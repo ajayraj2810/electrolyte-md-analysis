@@ -997,4 +997,596 @@ def calculate_state_conditioned_msd(
         starts, squared = displacement_squared_for_lag(
             metal_positions,
             lag,
+            MSD_ORIGIN_STRIDE,        )
+
+        # ----------------------------------------------------
+        # Initial-state-conditioned MSD
+        # ----------------------------------------------------
+
+        initial_states = states[
+            starts
+        ]
+
+        for state in STATE_ORDER:
+
+            initial_mask = (
+                initial_states == state
+            )
+
+            append_conditioned_result(
+                rows=rows,
+                squared_displacements=squared,
+                mask=initial_mask,
+                lag=lag,
+                frame_interval_ps=frame_interval_ps,
+                category_type="coordination_state",
+                category_value=state,
+                persistence_definition="initial_state",
+            )
+
+        initial_clustered = clusters[
+            starts
+        ]
+
+        append_conditioned_result(
+            rows=rows,
+            squared_displacements=squared,
+            mask=(~initial_clustered),
+            lag=lag,
+            frame_interval_ps=frame_interval_ps,
+            category_type="cluster_status",
+            category_value="isolated",
+            persistence_definition="initial_status",
+        )
+
+        append_conditioned_result(
+            rows=rows,
+            squared_displacements=squared,
+            mask=initial_clustered,
+            lag=lag,
+            frame_interval_ps=frame_interval_ps,
+            category_type="cluster_status",
+            category_value="clustered",
+            persistence_definition="initial_status",
+        )
+
+        # ----------------------------------------------------
+        # Persistent-state-conditioned MSD
+        # ----------------------------------------------------
+
+        for state in STATE_ORDER:
+
+            state_condition = (
+                states == state
+            )
+
+            persistent_mask = persistent_boolean_mask(
+                state_condition,
+                starts,
+                lag,
+            )
+
+            append_conditioned_result(
+                rows=rows,
+                squared_displacements=squared,
+                mask=persistent_mask,
+                lag=lag,
+                frame_interval_ps=frame_interval_ps,
+                category_type="coordination_state",
+                category_value=state,
+                persistence_definition="persistent_state",
+            )
+
+        persistent_isolated = persistent_boolean_mask(
+            ~clusters,
+            starts,
+            lag,
+        )
+
+        persistent_clustered = persistent_boolean_mask(
+            clusters,
+            starts,
+            lag,
+        )
+
+        append_conditioned_result(
+            rows=rows,
+            squared_displacements=squared,
+            mask=persistent_isolated,
+            lag=lag,
+            frame_interval_ps=frame_interval_ps,
+            category_type="cluster_status",
+            category_value="isolated",
+            persistence_definition="persistent_status",
+        )
+
+        append_conditioned_result(
+            rows=rows,
+            squared_displacements=squared,
+            mask=persistent_clustered,
+            lag=lag,
+            frame_interval_ps=frame_interval_ps,
+            category_type="cluster_status",
+            category_value="clustered",
+            persistence_definition="persistent_status",
+        )
+
+        print(
+            f"Conditioned MSD completed for lag "
+            f"{lag * frame_interval_ps / 1000.0:.4f} ns"
+        )
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# SUMMARY TABLES
+# ============================================================
+
+def summarize_ngp(msd_ngp_table):
+    """Extract maximum NGP for each species."""
+
+    rows = []
+
+    for species, data in msd_ngp_table.groupby(
+        "species"
+    ):
+
+        valid = data[
+            np.isfinite(
+                data["ngp_alpha2"]
+            )
+        ]
+
+        if valid.empty:
+            continue
+
+        maximum_index = valid[
+            "ngp_alpha2"
+        ].idxmax()
+
+        maximum_row = valid.loc[
+            maximum_index
+        ]
+
+        rows.append(
+            {
+                "species": species,
+                "maximum_ngp_alpha2":
+                    maximum_row["ngp_alpha2"],
+                "time_of_maximum_ngp_ps":
+                    maximum_row["lag_time_ps"],
+                "time_of_maximum_ngp_ns":
+                    maximum_row["lag_time_ns"],
+                "msd_at_maximum_ngp_A2":
+                    maximum_row["msd_A2"],
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    print("=" * 78)
+    print("MODULE 4: DYNAMIC HETEROGENEITY")
+    print("=" * 78)
+
+    print("\nWorking directory:")
+    print(WORK_DIR)
+
+    (
+        topology_file,
+        trajectory_file,
+        master_file,
+    ) = discover_input_files()
+
+    print("\nInput files:")
+    print(f"Topology   : {topology_file}")
+    print(f"Trajectory : {trajectory_file}")
+    print(f"Database   : {master_file}")
+
+    master = read_master_database(
+        master_file
+    )
+
+    (
+        database_frames,
+        metal_indices,
+        times_ps,
+        frame_interval_ps,
+        states,
+        clusters,
+    ) = create_state_and_cluster_matrices(
+        master
+    )
+
+    system = str(
+        master["system"].iloc[0]
+    )
+
+    metal_species = str(
+        master["metal_species"].iloc[0]
+    )
+
+    composition = str(
+        master["composition"].iloc[0]
+    )
+
+    print("\nSystem:")
+    print(f"  Name          : {system}")
+    print(f"  Metal         : {metal_species}")
+    print(f"  Composition   : {composition}")
+    print(f"  Frames        : {len(database_frames)}")
+    print(f"  Metals        : {len(metal_indices)}")
+    print(
+        f"  Frame interval: "
+        f"{frame_interval_ps:.6f} ps"
+    )
+
+    universe = mda.Universe(
+        str(topology_file),
+        str(trajectory_file),
+        format="LAMMPSDUMP",
+    )
+
+    if database_frames.min() < 0:
+        raise ValueError(
+            "Negative database frame indices are not supported."
+        )
+
+    if database_frames.max() >= len(
+        universe.trajectory
+    ):
+        raise IndexError(
+            "The master database contains frame indices beyond "
+            "the trajectory length."
+        )
+
+    metal_group = universe.select_atoms(
+        METAL_SELECTION
+    )
+
+    tfsi_group = universe.select_atoms(
+        TFSI_REPRESENTATIVE_SELECTION
+    )
+
+    emim_group = universe.select_atoms(
+        EMIM_REPRESENTATIVE_SELECTION
+    )
+
+    if len(metal_group) != len(metal_indices):
+        raise ValueError(
+            "Metal selection count does not match the master database.\n"
+            f"Trajectory selection: {len(metal_group)}\n"
+            f"Database metals: {len(metal_indices)}"
+        )
+
+    # The current master database metal_local_index must match
+    # the order of the metal atom selection from Module 1.
+    trajectory_frames = database_frames.astype(int)
+
+    metal_positions = extract_unwrapped_positions(
+        universe=universe,
+        atom_group=metal_group,
+        trajectory_frames=trajectory_frames,
+        label=metal_species,
+    )
+
+    tfsi_positions = extract_unwrapped_positions(
+        universe=universe,
+        atom_group=tfsi_group,
+        trajectory_frames=trajectory_frames,
+        label="TFSI",
+    )
+
+    emim_positions = extract_unwrapped_positions(
+        universe=universe,
+        atom_group=emim_group,
+        trajectory_frames=trajectory_frames,
+        label="EMIM",
+    )
+
+    if SAVE_UNWRAPPED_COORDINATES:
+
+        np.savez_compressed(
+            OUTPUT_DIR / "unwrapped_metal_positions.npz",
+            positions=metal_positions,
+            frames=trajectory_frames,
+            times_ps=times_ps,
+        )
+
+        np.savez_compressed(
+            OUTPUT_DIR / "unwrapped_tfsi_positions.npz",
+            positions=tfsi_positions,
+            frames=trajectory_frames,
+            times_ps=times_ps,
+        )
+
+        np.savez_compressed(
+            OUTPUT_DIR / "unwrapped_emim_positions.npz",
+            positions=emim_positions,
+            frames=trajectory_frames,
+            times_ps=times_ps,
+        )
+
+    lag_frames = create_lag_frames(
+        number_of_frames=len(
+            trajectory_frames
+        ),
+        frame_interval_ps=frame_interval_ps,
+    )
+
+    pd.DataFrame(
+        {
+            "lag_frames": lag_frames,
+            "lag_time_ps": (
+                lag_frames
+                * frame_interval_ps
+            ),
+            "lag_time_ns": (
+                lag_frames
+                * frame_interval_ps
+                / 1000.0
+            ),
+        }
+    ).to_csv(
+        OUTPUT_DIR / "lag_times.csv",
+        index=False,
+    )
+
+    # --------------------------------------------------------
+    # Conventional MSD and NGP
+    # --------------------------------------------------------
+
+    species_tables = []
+
+    for species_name, positions in [
+        (metal_species, metal_positions),
+        ("TFSI", tfsi_positions),
+        ("EMIM", emim_positions),
+    ]:
+
+        print(
+            f"\nCalculating MSD and NGP for {species_name}"
+        )
+
+        table = calculate_msd_ngp(
+            positions=positions,
+            lag_frames=lag_frames,
+            frame_interval_ps=frame_interval_ps,
+            species_name=species_name,
+        )
+
+        species_tables.append(
+            table
+        )
+
+    msd_ngp = pd.concat(
+        species_tables,
+        ignore_index=True,
+    )
+
+    msd_ngp.insert(
+        0,
+        "composition",
+        composition,
+    )
+
+    msd_ngp.insert(
+        0,
+        "metal_system",
+        metal_species,
+    )
+
+    msd_ngp.insert(
+        0,
+        "system",
+        system,
+    )
+
+    msd_ngp.to_csv(
+        OUTPUT_DIR / "msd_ngp_all_species.csv",
+        index=False,
+    )
+
+    ngp_summary = summarize_ngp(
+        msd_ngp
+    )
+
+    ngp_summary.insert(
+        0,
+        "composition",
+        composition,
+    )
+
+    ngp_summary.insert(
+        0,
+        "metal_system",
+        metal_species,
+    )
+
+    ngp_summary.insert(
+        0,
+        "system",
+        system,
+    )
+
+    ngp_summary.to_csv(
+        OUTPUT_DIR / "ngp_peak_summary.csv",
+        index=False,
+    )
+
+    # --------------------------------------------------------
+    # Self Van Hove displacement distributions
+    # --------------------------------------------------------
+
+    van_hove_tables = []
+
+    for species_name, positions in [
+        (metal_species, metal_positions),
+        ("TFSI", tfsi_positions),
+        ("EMIM", emim_positions),
+    ]:
+
+        print(
+            f"\nCalculating Van Hove distributions for "
+            f"{species_name}"
+        )
+
+        van_hove = calculate_van_hove_distributions(
+            positions=positions,
+            requested_lag_times_ns=
+                VAN_HOVE_LAG_TIMES_NS,
+            frame_interval_ps=frame_interval_ps,
+            species_name=species_name,
+        )
+
+        van_hove_tables.append(
+            van_hove
+        )
+
+    van_hove_all = pd.concat(
+        van_hove_tables,
+        ignore_index=True,
+    )
+
+    van_hove_all.insert(
+        0,
+        "composition",
+        composition,
+    )
+
+    van_hove_all.insert(
+        0,
+        "metal_system",
+        metal_species,
+    )
+
+    van_hove_all.insert(
+        0,
+        "system",
+        system,
+    )
+
+    van_hove_all.to_csv(
+        OUTPUT_DIR
+        / "self_van_hove_distributions.csv",
+        index=False,
+    )
+
+    # --------------------------------------------------------
+    # State- and cluster-conditioned metal MSD
+    # --------------------------------------------------------
+
+    print(
+        "\nCalculating state- and cluster-conditioned metal MSD"
+    )
+
+    conditioned_msd = calculate_state_conditioned_msd(
+        metal_positions=metal_positions,
+        states=states,
+        clusters=clusters,
+        lag_frames=lag_frames,
+        frame_interval_ps=frame_interval_ps,
+    )
+
+    conditioned_msd.insert(
+        0,
+        "composition",
+        composition,
+    )
+
+    conditioned_msd.insert(
+        0,
+        "metal_species",
+        metal_species,
+    )
+
+    conditioned_msd.insert(
+        0,
+        "system",
+        system,
+    )
+
+    conditioned_msd.to_csv(
+        OUTPUT_DIR
+        / "conditioned_metal_msd.csv",
+        index=False,
+    )
+
+    metadata = {
+        "system": system,
+        "metal_species": metal_species,
+        "composition": composition,
+        "topology_file": str(topology_file),
+        "trajectory_file": str(trajectory_file),
+        "master_file": str(master_file),
+        "frame_interval_ps": frame_interval_ps,
+        "number_of_frames": len(
+            trajectory_frames
+        ),
+        "number_of_metals": len(
+            metal_group
+        ),
+        "number_of_tfsi_representatives": len(
+            tfsi_group
+        ),
+        "number_of_emim_representatives": len(
+            emim_group
+        ),
+        "maximum_lag_ns": MAX_LAG_NS,
+        "number_of_lags": len(
+            lag_frames
+        ),
+        "van_hove_lag_times_requested_ns":
+            VAN_HOVE_LAG_TIMES_NS,
+        "van_hove_origin_stride":
+            VAN_HOVE_ORIGIN_STRIDE,
+        "msd_origin_stride":
             MSD_ORIGIN_STRIDE,
+        "metal_selection":
+            METAL_SELECTION,
+        "tfsi_representative_selection":
+            TFSI_REPRESENTATIVE_SELECTION,
+        "emim_representative_selection":
+            EMIM_REPRESENTATIVE_SELECTION,
+    }
+
+    with (
+        OUTPUT_DIR
+        / "dynamic_heterogeneity_metadata.json"
+    ).open(
+        "w",
+        encoding="utf-8",
+    ) as handle:
+
+        json.dump(
+            metadata,
+            handle,
+            indent=2,
+        )
+
+    print("\n" + "=" * 78)
+    print("MODULE 4 COMPLETED")
+    print("=" * 78)
+
+    print("\nResults saved in:")
+    print(OUTPUT_DIR)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
