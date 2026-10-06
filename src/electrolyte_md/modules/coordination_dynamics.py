@@ -997,4 +997,1132 @@ def build_exchange_events(
                 )
 
                 current_set = parse_id_set(
-                    current[column]
+                    current[column]                )
+
+                gained = (
+                    current_set - previous_set
+                )
+
+                lost = (
+                    previous_set - current_set
+                )
+
+                retained = (
+                    previous_set
+                    & current_set
+                )
+
+                rows.append(
+                    {
+                        "system": system,
+                        "metal_species": metal,
+                        "composition": composition,
+                        "frame": current_frame,
+                        "time_ps": (
+                            current_frame
+                            * FRAME_INTERVAL_PS
+                        ),
+                        "block": frame_to_block[
+                            current_frame
+                        ],
+                        "metal_local_index": int(
+                            metal_index
+                        ),
+                        "metal_atom_id": metal_atom_id,
+                        "contact_type": contact_type,
+                        "n_previous": len(
+                            previous_set
+                        ),
+                        "n_current": len(
+                            current_set
+                        ),
+                        "n_gained": len(gained),
+                        "n_lost": len(lost),
+                        "n_retained": len(
+                            retained
+                        ),
+                        "gained_ids": ";".join(
+                            str(value)
+                            for value in sorted(gained)
+                        ),
+                        "lost_ids": ";".join(
+                            str(value)
+                            for value in sorted(lost)
+                        ),
+                        "exchange_occurred": int(
+                            len(gained) > 0
+                            or len(lost) > 0
+                        ),
+                    }
+                )
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# TFSI BRIDGE LIFETIMES
+# ============================================================
+
+def build_tfsi_bridge_events(
+    bridge_file,
+    event_definition,
+    gap_tolerance_frames,
+    first_frame,
+    last_frame,
+    frame_to_block,
+    system,
+    metal,
+    composition,
+):
+    """
+    Calculate lifetimes of TFSI molecules bridging two or more metals.
+    """
+
+    if bridge_file is None:
+        return pd.DataFrame()
+
+    bridge_data = pd.read_csv(
+        bridge_file,
+        usecols=[
+            "frame",
+            "tfsi_resid",
+            "is_bridging",
+        ],
+        low_memory=False,
+    )
+
+    bridge_data["frame"] = pd.to_numeric(
+        bridge_data["frame"],
+        errors="raise",
+    ).astype(int)
+
+    bridge_data = discard_initial_frames(
+        bridge_data,
+        DISCARD_INITIAL_FRACTION,
+    )
+
+    bridge_data = bridge_data[
+        bridge_data["is_bridging"] == 1
+    ].copy()
+
+    presence = defaultdict(list)
+
+    for row in bridge_data.itertuples(
+        index=False
+    ):
+        presence[
+            int(row.tfsi_resid)
+        ].append(
+            int(row.frame)
+        )
+
+    rows = []
+
+    for tfsi_resid, frames in presence.items():
+
+        runs = create_presence_runs(
+            frames,
+            gap_tolerance_frames,
+        )
+
+        for start_frame, end_frame in runs:
+
+            left_censored = (
+                start_frame == first_frame
+            )
+
+            right_censored = (
+                end_frame == last_frame
+            )
+
+            rows.append(
+                {
+                    "system": system,
+                    "metal_species": metal,
+                    "composition": composition,
+                    "event_definition": event_definition,
+                    "tfsi_resid": tfsi_resid,
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                    "start_time_ps": (
+                        start_frame
+                        * FRAME_INTERVAL_PS
+                    ),
+                    "end_time_ps": (
+                        end_frame
+                        * FRAME_INTERVAL_PS
+                    ),
+                    "duration_frames": duration_frames(
+                        start_frame,
+                        end_frame,
+                    ),
+                    "duration_ps": duration_ps(
+                        start_frame,
+                        end_frame,
+                    ),
+                    "left_censored": int(
+                        left_censored
+                    ),
+                    "right_censored": int(
+                        right_censored
+                    ),
+                    "censored": int(
+                        left_censored
+                        or right_censored
+                    ),
+                    "start_block": frame_to_block[
+                        start_frame
+                    ],
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# EVENT SUMMARIES
+# ============================================================
+
+def summarize_events(
+    events,
+    grouping_columns,
+):
+    """
+    Create overall residence-time summaries.
+    """
+
+    if events.empty:
+        return pd.DataFrame()
+
+    rows = []
+
+    for group_key, group in events.groupby(
+        grouping_columns,
+        dropna=False,
+    ):
+
+        if not isinstance(group_key, tuple):
+            group_key = (group_key,)
+
+        row = dict(
+            zip(
+                grouping_columns,
+                group_key,
+            )
+        )
+
+        all_durations = group[
+            "duration_ps"
+        ].astype(float)
+
+        uncensored = group[
+            group["censored"] == 0
+        ]
+
+        uncensored_durations = uncensored[
+            "duration_ps"
+        ].astype(float)
+
+        row.update(
+            {
+                "n_events_total": len(group),
+                "n_events_uncensored": len(
+                    uncensored
+                ),
+                "fraction_censored": group[
+                    "censored"
+                ].mean(),
+                "mean_duration_all_ps":
+                    all_durations.mean(),
+                "median_duration_all_ps":
+                    all_durations.median(),
+                "mean_duration_uncensored_ps": (
+                    uncensored_durations.mean()
+                    if len(uncensored) > 0
+                    else np.nan
+                ),
+                "median_duration_uncensored_ps": (
+                    uncensored_durations.median()
+                    if len(uncensored) > 0
+                    else np.nan
+                ),
+                "maximum_duration_ps":
+                    all_durations.max(),
+            }
+        )
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def calculate_block_summary(
+    events,
+    grouping_columns,
+):
+    """
+    Calculate mean event lifetimes within each trajectory block.
+    """
+
+    if events.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    uncensored = events[
+        events["censored"] == 0
+    ].copy()
+
+    if uncensored.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    block_grouping = (
+        grouping_columns
+        + ["start_block"]
+    )
+
+    block_means = (
+        uncensored
+        .groupby(
+            block_grouping,
+            dropna=False,
+            as_index=False,
+        )
+        .agg(
+            mean_lifetime_ps=(
+                "duration_ps",
+                "mean",
+            ),
+            median_lifetime_ps=(
+                "duration_ps",
+                "median",
+            ),
+            n_events=(
+                "duration_ps",
+                "size",
+            ),
+        )
+    )
+
+    summary_rows = []
+
+    for group_key, group in block_means.groupby(
+        grouping_columns,
+        dropna=False,
+    ):
+
+        if not isinstance(group_key, tuple):
+            group_key = (group_key,)
+
+        row = dict(
+            zip(
+                grouping_columns,
+                group_key,
+            )
+        )
+
+        values = group[
+            "mean_lifetime_ps"
+        ].astype(float)
+
+        number_of_blocks = len(values)
+
+        standard_deviation = (
+            values.std(ddof=1)
+            if number_of_blocks > 1
+            else np.nan
+        )
+
+        row.update(
+            {
+                "mean_of_block_means_ps":
+                    values.mean(),
+                "block_std_ps":
+                    standard_deviation,
+                "block_sem_ps": (
+                    standard_deviation
+                    / np.sqrt(number_of_blocks)
+                    if number_of_blocks > 1
+                    else np.nan
+                ),
+                "n_blocks":
+                    number_of_blocks,
+                "total_uncensored_events":
+                    group["n_events"].sum(),
+            }
+        )
+
+        summary_rows.append(row)
+
+    return (
+        block_means,
+        pd.DataFrame(summary_rows),
+    )
+
+
+def create_survival_tables(
+    events,
+    grouping_columns,
+):
+    """
+    Generate survival functions for each contact/state category.
+    """
+
+    if events.empty:
+        return pd.DataFrame()
+
+    outputs = []
+
+    for group_key, group in events.groupby(
+        grouping_columns,
+        dropna=False,
+    ):
+
+        if len(group) < MIN_EVENTS_FOR_SURVIVAL:
+            continue
+
+        if not isinstance(group_key, tuple):
+            group_key = (group_key,)
+
+        group_information = dict(
+            zip(
+                grouping_columns,
+                group_key,
+            )
+        )
+
+        survival = calculate_kaplan_meier(
+            group["duration_ps"],
+            group["right_censored"].astype(bool),
+        )
+
+        for column, value in reversed(
+            list(group_information.items())
+        ):
+            survival.insert(
+                0,
+                column,
+                value,
+            )
+
+        outputs.append(survival)
+
+    if len(outputs) == 0:
+        return pd.DataFrame()
+
+    return pd.concat(
+        outputs,
+        ignore_index=True,
+    )
+
+
+# ============================================================
+# SAVE CONTACT ANALYSIS
+# ============================================================
+
+def run_contact_lifetime_analysis(
+    master,
+    output_dir,
+    first_frame,
+    last_frame,
+    frame_to_block,
+    system,
+    metal,
+    composition,
+    metal_atom_lookup,
+):
+    """
+    Run all four contact-lifetime analyses.
+    """
+
+    event_tables = []
+
+    for contact_type, partner_column in CONTACT_TYPES.items():
+
+        print(
+            f"Calculating continuous {contact_type} lifetimes..."
+        )
+
+        continuous = build_contact_events(
+            master=master,
+            contact_type=contact_type,
+            partner_column=partner_column,
+            event_definition="continuous",
+            gap_tolerance_frames=0,
+            first_frame=first_frame,
+            last_frame=last_frame,
+            frame_to_block=frame_to_block,
+            system=system,
+            metal=metal,
+            composition=composition,
+            metal_atom_lookup=metal_atom_lookup,
+        )
+
+        print(
+            f"Calculating intermittent {contact_type} lifetimes..."
+        )
+
+        intermittent = build_contact_events(
+            master=master,
+            contact_type=contact_type,
+            partner_column=partner_column,
+            event_definition=(
+                f"intermittent_gap_"
+                f"{GAP_TOLERANCE_FRAMES}_frames"
+            ),
+            gap_tolerance_frames=GAP_TOLERANCE_FRAMES,
+            first_frame=first_frame,
+            last_frame=last_frame,
+            frame_to_block=frame_to_block,
+            system=system,
+            metal=metal,
+            composition=composition,
+            metal_atom_lookup=metal_atom_lookup,
+        )
+
+        event_tables.extend(
+            [
+                continuous,
+                intermittent,
+            ]
+        )
+
+    events = pd.concat(
+        event_tables,
+        ignore_index=True,
+    )
+
+    events.to_csv(
+        output_dir
+        / "contact_lifetime_events.csv.gz",
+        index=False,
+        compression="gzip",
+    )
+
+    grouping = [
+        "system",
+        "metal_species",
+        "composition",
+        "contact_type",
+        "event_definition",
+    ]
+
+    summary = summarize_events(
+        events,
+        grouping,
+    )
+
+    summary.to_csv(
+        output_dir
+        / "contact_lifetime_summary.csv",
+        index=False,
+    )
+
+    block_means, block_summary = (
+        calculate_block_summary(
+            events,
+            grouping,
+        )
+    )
+
+    block_means.to_csv(
+        output_dir
+        / "contact_lifetime_block_means.csv",
+        index=False,
+    )
+
+    block_summary.to_csv(
+        output_dir
+        / "contact_lifetime_block_summary.csv",
+        index=False,
+    )
+
+    survival = create_survival_tables(
+        events,
+        grouping,
+    )
+
+    survival.to_csv(
+        output_dir
+        / "contact_survival_functions.csv",
+        index=False,
+    )
+
+
+# ============================================================
+# SAVE STATE ANALYSIS
+# ============================================================
+
+def run_state_analysis(
+    master,
+    output_dir,
+    first_frame,
+    last_frame,
+    frame_to_block,
+    system,
+    metal,
+    composition,
+):
+    """
+    Calculate state lifetimes and transition statistics.
+    """
+
+    print(
+        "Calculating coordination-state residence times..."
+    )
+
+    events = build_state_events(
+        master=master,
+        first_frame=first_frame,
+        last_frame=last_frame,
+        frame_to_block=frame_to_block,
+        system=system,
+        metal=metal,
+        composition=composition,
+    )
+
+    events.to_csv(
+        output_dir
+        / "coordination_state_events.csv.gz",
+        index=False,
+        compression="gzip",
+    )
+
+    grouping = [
+        "system",
+        "metal_species",
+        "composition",
+        "state",
+    ]
+
+    summary = summarize_events(
+        events,
+        grouping,
+    )
+
+    summary.to_csv(
+        output_dir
+        / "coordination_state_lifetime_summary.csv",
+        index=False,
+    )
+
+    block_means, block_summary = (
+        calculate_block_summary(
+            events,
+            grouping,
+        )
+    )
+
+    block_means.to_csv(
+        output_dir
+        / "coordination_state_block_means.csv",
+        index=False,
+    )
+
+    block_summary.to_csv(
+        output_dir
+        / "coordination_state_block_summary.csv",
+        index=False,
+    )
+
+    survival = create_survival_tables(
+        events,
+        grouping,
+    )
+
+    survival.to_csv(
+        output_dir
+        / "coordination_state_survival.csv",
+        index=False,
+    )
+
+    transitions = build_state_transition_table(
+        master,
+        system,
+        metal,
+        composition,
+    )
+
+    transitions.to_csv(
+        output_dir
+        / "coordination_state_transition_matrix.csv",
+        index=False,
+    )
+
+
+# ============================================================
+# SAVE EXCHANGE ANALYSIS
+# ============================================================
+
+def run_exchange_analysis(
+    master,
+    output_dir,
+    frame_to_block,
+    system,
+    metal,
+    composition,
+):
+    """
+    Calculate exchange frequencies for all contact types.
+    """
+
+    print(
+        "Calculating ligand-exchange statistics..."
+    )
+
+    exchange_events = build_exchange_events(
+        master,
+        frame_to_block,
+        system,
+        metal,
+        composition,
+    )
+
+    exchange_events.to_csv(
+        output_dir
+        / "ligand_exchange_events.csv.gz",
+        index=False,
+        compression="gzip",
+    )
+
+    block_summary = (
+        exchange_events
+        .groupby(
+            [
+                "system",
+                "metal_species",
+                "composition",
+                "contact_type",
+                "block",
+            ],
+            as_index=False,
+        )
+        .agg(
+            n_observations=(
+                "exchange_occurred",
+                "size",
+            ),
+            n_exchange_steps=(
+                "exchange_occurred",
+                "sum",
+            ),
+            total_gained=(
+                "n_gained",
+                "sum",
+            ),
+            total_lost=(
+                "n_lost",
+                "sum",
+            ),
+            mean_gained_per_saved_step=(
+                "n_gained",
+                "mean",
+            ),
+            mean_lost_per_saved_step=(
+                "n_lost",
+                "mean",
+            ),
+        )
+    )
+
+    block_summary[
+        "exchange_probability_per_saved_step"
+    ] = (
+        block_summary["n_exchange_steps"]
+        / block_summary["n_observations"]
+    )
+
+    # This is the number of saved intervals containing at least one
+    # exchange, normalized per metal-ns of observation.
+    block_summary[
+        "exchange_steps_per_metal_ns"
+    ] = (
+        block_summary["n_exchange_steps"]
+        / (
+            block_summary["n_observations"]
+            * FRAME_INTERVAL_PS
+            / 1000.0
+        )
+    )
+
+    block_summary.to_csv(
+        output_dir
+        / "ligand_exchange_block_summary.csv",
+        index=False,
+    )
+
+    summary = (
+        block_summary
+        .groupby(
+            [
+                "system",
+                "metal_species",
+                "composition",
+                "contact_type",
+            ],
+            as_index=False,
+        )
+        .agg(
+            mean_exchange_probability=(
+                "exchange_probability_per_saved_step",
+                "mean",
+            ),
+            block_std_exchange_probability=(
+                "exchange_probability_per_saved_step",
+                "std",
+            ),
+            mean_exchange_steps_per_metal_ns=(
+                "exchange_steps_per_metal_ns",
+                "mean",
+            ),
+            block_std_exchange_steps_per_metal_ns=(
+                "exchange_steps_per_metal_ns",
+                "std",
+            ),
+            mean_gained_per_saved_step=(
+                "mean_gained_per_saved_step",
+                "mean",
+            ),
+            mean_lost_per_saved_step=(
+                "mean_lost_per_saved_step",
+                "mean",
+            ),
+            n_blocks=(
+                "block",
+                "nunique",
+            ),
+        )
+    )
+
+    summary[
+        "block_sem_exchange_steps_per_metal_ns"
+    ] = (
+        summary[
+            "block_std_exchange_steps_per_metal_ns"
+        ]
+        / np.sqrt(
+            summary["n_blocks"]
+        )
+    )
+
+    summary.to_csv(
+        output_dir
+        / "ligand_exchange_summary.csv",
+        index=False,
+    )
+
+
+# ============================================================
+# SAVE BRIDGE ANALYSIS
+# ============================================================
+
+def run_bridge_analysis(
+    bridge_file,
+    output_dir,
+    first_frame,
+    last_frame,
+    frame_to_block,
+    system,
+    metal,
+    composition,
+):
+    """
+    Calculate continuous and intermittent TFSI bridge lifetimes.
+    """
+
+    if bridge_file is None:
+        print(
+            "No tfsi_bridging_*.csv.gz file was found. "
+            "Skipping bridge lifetime analysis."
+        )
+
+        return
+
+    print("\nReading TFSI bridging file:")
+    print(bridge_file)
+
+    continuous = build_tfsi_bridge_events(
+        bridge_file=bridge_file,
+        event_definition="continuous",
+        gap_tolerance_frames=0,
+        first_frame=first_frame,
+        last_frame=last_frame,
+        frame_to_block=frame_to_block,
+        system=system,
+        metal=metal,
+        composition=composition,
+    )
+
+    intermittent = build_tfsi_bridge_events(
+        bridge_file=bridge_file,
+        event_definition=(
+            f"intermittent_gap_"
+            f"{GAP_TOLERANCE_FRAMES}_frames"
+        ),
+        gap_tolerance_frames=GAP_TOLERANCE_FRAMES,
+        first_frame=first_frame,
+        last_frame=last_frame,
+        frame_to_block=frame_to_block,
+        system=system,
+        metal=metal,
+        composition=composition,
+    )
+
+    bridge_events = pd.concat(
+        [
+            continuous,
+            intermittent,
+        ],
+        ignore_index=True,
+    )
+
+    bridge_events.to_csv(
+        output_dir
+        / "tfsi_bridge_lifetime_events.csv.gz",
+        index=False,
+        compression="gzip",
+    )
+
+    grouping = [
+        "system",
+        "metal_species",
+        "composition",
+        "event_definition",
+    ]
+
+    summary = summarize_events(
+        bridge_events,
+        grouping,
+    )
+
+    summary.to_csv(
+        output_dir
+        / "tfsi_bridge_lifetime_summary.csv",
+        index=False,
+    )
+
+    block_means, block_summary = (
+        calculate_block_summary(
+            bridge_events,
+            grouping,
+        )
+    )
+
+    block_means.to_csv(
+        output_dir
+        / "tfsi_bridge_lifetime_block_means.csv",
+        index=False,
+    )
+
+    block_summary.to_csv(
+        output_dir
+        / "tfsi_bridge_lifetime_block_summary.csv",
+        index=False,
+    )
+
+    survival = create_survival_tables(
+        bridge_events,
+        grouping,
+    )
+
+    survival.to_csv(
+        output_dir
+        / "tfsi_bridge_survival.csv",
+        index=False,
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print("=" * 78)
+    print("MODULE 3: COORDINATION DYNAMICS")
+    print("=" * 78)
+
+    print("\nCurrent working directory:")
+    print(WORK_DIR)
+
+    master_file, bridge_file = find_input_files()
+
+    print("\nInput files found:")
+    print(f"Master database : {master_file}")
+    print(
+        f"TFSI bridge file: "
+        f"{bridge_file if bridge_file else 'not found'}"
+    )
+
+    master = read_master_database(
+        master_file
+    )
+
+    if master.empty:
+        raise RuntimeError(
+            "The master database is empty after filtering."
+        )
+
+    system = str(
+        master["system"].iloc[0]
+    )
+
+    metal = str(
+        master["metal_species"].iloc[0]
+    )
+
+    composition = str(
+        master["composition"].iloc[0]
+    )
+
+    first_frame = int(
+        master["frame"].min()
+    )
+
+    last_frame = int(
+        master["frame"].max()
+    )
+
+    number_of_frames = int(
+        master["frame"].nunique()
+    )
+
+    number_of_metals = int(
+        master[
+            "metal_local_index"
+        ].nunique()
+    )
+
+    frame_to_block = create_frame_block_mapping(
+        master["frame"].unique(),
+        N_BLOCKS,
+    )
+
+    metal_atom_lookup = (        master[
+            [
+                "metal_local_index",
+                "metal_atom_id",
+            ]
+        ]
+        .drop_duplicates(
+            "metal_local_index"
+        )
+        .set_index(
+            "metal_local_index"
+        )[
+            "metal_atom_id"
+        ]
+        .astype(int)
+        .to_dict()
+    )
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    print("\nSystem information:")
+    print(f"System            : {system}")
+    print(f"Metal             : {metal}")
+    print(f"Composition       : {composition}")
+    print(f"Number of frames  : {number_of_frames}")
+    print(f"Number of metals  : {number_of_metals}")
+    print(f"First frame       : {first_frame}")
+    print(f"Last frame        : {last_frame}")
+    print(
+        f"Nominal time span : "
+        f"{number_of_frames * FRAME_INTERVAL_PS / 1000.0:.3f} ns"
+    )
+
+    run_contact_lifetime_analysis(
+        master=master,
+        output_dir=OUTPUT_DIR,
+        first_frame=first_frame,
+        last_frame=last_frame,
+        frame_to_block=frame_to_block,
+        system=system,
+        metal=metal,
+        composition=composition,
+        metal_atom_lookup=metal_atom_lookup,
+    )
+
+    run_state_analysis(
+        master=master,
+        output_dir=OUTPUT_DIR,
+        first_frame=first_frame,
+        last_frame=last_frame,
+        frame_to_block=frame_to_block,
+        system=system,
+        metal=metal,
+        composition=composition,
+    )
+
+    run_exchange_analysis(
+        master=master,
+        output_dir=OUTPUT_DIR,
+        frame_to_block=frame_to_block,
+        system=system,
+        metal=metal,
+        composition=composition,
+    )
+
+    run_bridge_analysis(
+        bridge_file=bridge_file,
+        output_dir=OUTPUT_DIR,
+        first_frame=first_frame,
+        last_frame=last_frame,
+        frame_to_block=frame_to_block,
+        system=system,
+        metal=metal,
+        composition=composition,
+    )
+
+    metadata = {
+        "working_directory": str(WORK_DIR),
+        "master_file": str(master_file),
+        "tfsi_bridge_file": (
+            str(bridge_file)
+            if bridge_file is not None
+            else None
+        ),
+        "system": system,
+        "metal_species": metal,
+        "composition": composition,
+        "frame_interval_ps": FRAME_INTERVAL_PS,
+        "number_of_frames": number_of_frames,
+        "number_of_metals": number_of_metals,
+        "first_frame": first_frame,
+        "last_frame": last_frame,
+        "number_of_blocks": N_BLOCKS,
+        "gap_tolerance_frames":
+            GAP_TOLERANCE_FRAMES,
+        "gap_tolerance_ps": (
+            GAP_TOLERANCE_FRAMES
+            * FRAME_INTERVAL_PS
+        ),
+        "discard_initial_fraction":
+            DISCARD_INITIAL_FRACTION,
+    }
+
+    with (
+        OUTPUT_DIR
+        / "coordination_dynamics_metadata.json"
+    ).open(
+        "w",
+        encoding="utf-8",
+    ) as handle:
+
+        json.dump(
+            metadata,
+            handle,
+            indent=2,
+        )
+
+    print("\n" + "=" * 78)
+    print("MODULE 3 COMPLETED")
+    print("=" * 78)
+
+    print("\nResults saved in:")
+    print(OUTPUT_DIR)
+
+
+if __name__ == "__main__":
+    main()
