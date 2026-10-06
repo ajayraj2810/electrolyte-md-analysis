@@ -1,0 +1,22 @@
+system:
+  name: example_system
+  composition: composition
+trajectory:
+  topology: system.data
+  trajectory: system.lammpsdump
+  frame_interval_ps: 10.0
+selections:
+  metal: "type 17"
+  polymer_oxygen: "resid 1:40 and type 4"
+  anion_oxygen: "type 9"
+  anion_reference: "type 7"
+  ionic_liquid_cation_reference: "type 18"
+coordination:
+  metal_polymer_cutoff_A: 4.0
+  metal_anion_cutoff_A: 4.0
+metal_properties:
+  charge_number: 1.0
+  molar_mass_g_mol: 40.0
+analysis:
+  temperature_K: 380.0
+  local_polymer_bridge_max_site_separation: 4
