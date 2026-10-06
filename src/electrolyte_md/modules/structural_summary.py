@@ -997,4 +997,756 @@ def analyze_system(system_name, config):
 
     cluster_number_distribution[
         "metal_fraction"
-    ] = (
+    ] = (        cluster_number_distribution["metal_weight"]
+        / cluster_number_distribution[
+            "metal_weight"
+        ].sum()
+    )
+
+    cluster_number_distribution.insert(
+        0,
+        "composition",
+        composition,
+    )
+
+    cluster_number_distribution.insert(
+        0,
+        "metal_species",
+        metal,
+    )
+
+    cluster_number_distribution.insert(
+        0,
+        "system",
+        system_name,
+    )
+
+    cluster_number_distribution.to_csv(
+        system_output_dir
+        / f"cluster_size_distribution_{system_name}.csv",
+        index=False,
+    )
+
+    # ========================================================
+    # 9. BASIC SYSTEM FIGURES
+    # ========================================================
+
+    make_system_coordination_plot(
+        system_name,
+        metal,
+        composition,
+        coordination_distribution,
+    )
+
+    make_system_joint_map(
+        system_name,
+        metal,
+        composition,
+        joint_counts,
+    )
+
+    make_system_denticity_plot(
+        system_name,
+        metal,
+        composition,
+        denticity_distribution,
+    )
+
+    make_system_cluster_plot(
+        system_name,
+        metal,
+        composition,
+        cluster_number_distribution,
+    )
+
+    print(
+        f"Completed structural summary for {system_name}."
+    )
+
+    return {
+        "overall_summary": overall_summary,
+        "state_summary": state_summary,
+        "coordination_distribution":
+            coordination_distribution,
+        "joint_coordination": joint_counts,
+        "denticity_distribution":
+            denticity_distribution,
+        "tfsi_metals_per_anion":
+            tfsi_metal_count_distribution,
+        "peo_metals_per_chain":
+            peo_metals_per_chain_distribution,
+        "peo_eo_separation":
+            separation_distribution,
+        "cluster_distribution":
+            cluster_number_distribution,
+        "block_means":
+            block_frame_means,
+    }
+
+
+# ============================================================
+# SYSTEM-LEVEL PLOTS
+# ============================================================
+
+def make_system_coordination_plot(
+    system_name,
+    metal,
+    composition,
+    coordination_distribution,
+):
+    """Plot selected coordination-number distributions."""
+
+    metrics = [
+        (
+            "n_peo_oxygen",
+            "PEO oxygen coordination number",
+        ),
+        (
+            "n_tfsi_molecules",
+            "Distinct TFSI molecules per metal",
+        ),
+        (
+            "total_oxygen_cn",
+            "Total oxygen coordination number",
+        ),
+    ]
+
+    for metric, xlabel in metrics:
+
+        subset = coordination_distribution[
+            coordination_distribution["metric"]
+            == metric
+        ]
+
+        fig, ax = plt.subplots(
+            figsize=(6.2, 4.5)
+        )
+
+        ax.plot(
+            subset["coordination_number"],
+            subset["probability"],
+            marker="o",
+        )
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Probability")
+        ax.set_title(
+            f"{metal}, composition {composition}"
+        )
+
+        ax.set_ylim(bottom=0)
+        ax.grid(alpha=0.25)
+
+        fig.tight_layout()
+
+        save_figure(
+            fig,
+            f"{system_name}_{metric}_distribution",
+        )
+
+
+def make_system_joint_map(
+    system_name,
+    metal,
+    composition,
+    joint_counts,
+):
+    """Plot joint PEO oxygen CN versus TFSI molecular CN."""
+
+    pivot = (
+        joint_counts
+        .pivot(
+            index="n_tfsi_molecules",
+            columns="n_peo_oxygen",
+            values="probability",
+        )
+        .fillna(0.0)
+        .sort_index()
+        .sort_index(axis=1)
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(7.0, 5.2)
+    )
+
+    image = ax.imshow(
+        pivot.values,
+        origin="lower",
+        aspect="auto",
+        interpolation="nearest",
+    )
+
+    ax.set_xticks(
+        np.arange(len(pivot.columns))
+    )
+
+    ax.set_xticklabels(
+        pivot.columns.astype(int)
+    )
+
+    ax.set_yticks(
+        np.arange(len(pivot.index))
+    )
+
+    ax.set_yticklabels(
+        pivot.index.astype(int)
+    )
+
+    ax.set_xlabel(
+        "Number of coordinating PEO oxygens"
+    )
+
+    ax.set_ylabel(
+        "Number of coordinating TFSI molecules"
+    )
+
+    ax.set_title(
+        f"{metal}, composition {composition}"
+    )
+
+    colorbar = fig.colorbar(
+        image,
+        ax=ax,
+    )
+
+    colorbar.set_label(
+        "Probability"
+    )
+
+    fig.tight_layout()
+
+    save_figure(
+        fig,
+        f"{system_name}_joint_peo_tfsi_map",
+    )
+
+
+def make_system_denticity_plot(
+    system_name,
+    metal,
+    composition,
+    denticity_distribution,
+):
+    """Plot TFSI denticity distribution."""
+
+    if denticity_distribution.empty:
+        return
+
+    fig, ax = plt.subplots(
+        figsize=(5.8, 4.4)
+    )
+
+    ax.bar(
+        denticity_distribution["denticity"],
+        denticity_distribution["probability"],
+    )
+
+    ax.set_xlabel(
+        "TFSI denticity"
+    )
+
+    ax.set_ylabel(
+        "Probability among coordinated TFSI"
+    )
+
+    ax.set_title(
+        f"{metal}, composition {composition}"
+    )
+
+    ax.set_xticks(
+        denticity_distribution[
+            "denticity"
+        ].astype(int)
+    )
+
+    ax.set_ylim(bottom=0)
+    ax.grid(
+        axis="y",
+        alpha=0.25,
+    )
+
+    fig.tight_layout()
+
+    save_figure(
+        fig,
+        f"{system_name}_tfsi_denticity",
+    )
+
+
+def make_system_cluster_plot(
+    system_name,
+    metal,
+    composition,
+    cluster_distribution,
+):
+    """Plot metal-weighted cluster-size distribution."""
+
+    fig, ax = plt.subplots(
+        figsize=(6.0, 4.5)
+    )
+
+    ax.bar(
+        cluster_distribution["n_metals"],
+        cluster_distribution["metal_fraction"],
+    )
+
+    ax.set_xlabel(
+        "Number of metal ions in cluster"
+    )
+
+    ax.set_ylabel(
+        "Fraction of metal ions"
+    )
+
+    ax.set_title(
+        f"{metal}, composition {composition}"
+    )
+
+    ax.set_xticks(
+        cluster_distribution[
+            "n_metals"
+        ].astype(int)
+    )
+
+    ax.set_ylim(bottom=0)
+    ax.grid(
+        axis="y",
+        alpha=0.25,
+    )
+
+    fig.tight_layout()
+
+    save_figure(
+        fig,
+        f"{system_name}_cluster_size_distribution",
+    )
+
+
+# ============================================================
+# COMBINED COMPARISON TABLES AND PLOTS
+# ============================================================
+
+def make_combined_metric_plot(
+    summary_table,
+    metric,
+    ylabel,
+    filename,
+):
+    """Plot a block-averaged structural metric for all systems."""
+
+    subset = summary_table[
+        summary_table["metric"] == metric
+    ].copy()
+
+    if subset.empty:
+        print(
+            f"Skipping missing combined metric: {metric}"
+        )
+        return
+
+    subset = sort_compositions(subset)
+
+    fig, ax = plt.subplots(
+        figsize=(7.2, 5.0)
+    )
+
+    for metal, metal_data in subset.groupby(
+        "metal_species",
+        observed=True,
+    ):
+
+        metal_data = metal_data.sort_values(
+            "composition"
+        )
+
+        x = np.arange(
+            len(metal_data)
+        )
+
+        ax.errorbar(
+            x,
+            metal_data["mean"],
+            yerr=metal_data["block_std"],
+            marker="o",
+            capsize=4,
+            label=metal,
+        )
+
+        ax.set_xticks(x)
+
+        ax.set_xticklabels(
+            metal_data["composition"].astype(str)
+        )
+
+    ax.set_xlabel(
+        "IL:salt composition"
+    )
+
+    ax.set_ylabel(ylabel)
+
+    ax.legend(
+        frameon=False
+    )
+
+    ax.grid(
+        axis="y",
+        alpha=0.25,
+    )
+
+    fig.tight_layout()
+
+    save_figure(
+        fig,
+        filename,
+    )
+
+
+def make_combined_state_plot(state_summary):
+    """Plot P/PT/T/F state populations across systems."""
+
+    data = sort_compositions(
+        state_summary
+    )
+
+    systems = (
+        data[
+            [
+                "metal_species",
+                "composition",
+            ]
+        ]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+
+    labels = [
+        f"{row.metal_species}\n{row.composition}"
+        for row in systems.itertuples()
+    ]
+
+    x = np.arange(
+        len(systems)
+    )
+
+    state_order = [
+        "P",
+        "PT",
+        "T",
+        "F",
+    ]
+
+    bottom = np.zeros(
+        len(systems)
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(9.0, 5.3)
+    )
+
+    for state in state_order:
+
+        heights = []
+
+        for row in systems.itertuples():
+
+            selection = data[
+                (data["metal_species"]
+                 == row.metal_species)
+                &
+                (data["composition"]
+                 == row.composition)
+                &
+                (data["state"] == state)
+            ]
+
+            if selection.empty:
+                heights.append(0.0)
+            else:
+                heights.append(
+                    selection[
+                        "mean_fraction"
+                    ].iloc[0]
+                )
+
+        heights = np.asarray(
+            heights
+        )
+
+        ax.bar(
+            x,
+            heights,
+            bottom=bottom,
+            label=state,
+        )
+
+        bottom += heights
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+
+    ax.set_ylabel(
+        "Coordination-state fraction"
+    )
+
+    ax.set_ylim(
+        0,
+        1,
+    )
+
+    ax.legend(
+        frameon=False,
+        ncol=4,
+    )
+
+    ax.grid(
+        axis="y",
+        alpha=0.25,
+    )
+
+    fig.tight_layout()
+
+    save_figure(
+        fig,
+        "combined_coordination_state_fractions",
+    )
+
+
+# ============================================================
+# MAIN DRIVER
+# ============================================================
+
+def main():
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    print("=" * 78)
+    print("STRUCTURAL SUMMARY AND DISTRIBUTIONS")
+    print("=" * 78)
+
+    results = {}
+
+    for system_name, config in SYSTEMS.items():
+        results[system_name] = analyze_system(
+            system_name,
+            config,
+        )
+
+    # --------------------------------------------------------
+    # Combine all tables
+    # --------------------------------------------------------
+
+    combined_overall_summary = pd.concat(
+        [
+            result["overall_summary"]
+            for result in results.values()
+        ],
+        ignore_index=True,
+    )
+
+    combined_state_summary = pd.concat(
+        [
+            result["state_summary"]
+            for result in results.values()
+        ],
+        ignore_index=True,
+    )
+
+    combined_coordination_distribution = pd.concat(
+        [
+            result["coordination_distribution"]
+            for result in results.values()
+        ],
+        ignore_index=True,
+    )
+
+    combined_joint_coordination = pd.concat(
+        [
+            result["joint_coordination"]
+            for result in results.values()
+        ],
+        ignore_index=True,
+    )
+
+    combined_denticity = pd.concat(
+        [
+            result["denticity_distribution"]
+            for result in results.values()
+        ],
+        ignore_index=True,
+    )
+
+    combined_tfsi_bridging = pd.concat(
+        [
+            result["tfsi_metals_per_anion"]
+            for result in results.values()
+        ],
+        ignore_index=True,
+    )
+
+    combined_peo_occupancy = pd.concat(
+        [
+            result["peo_metals_per_chain"]
+            for result in results.values()
+        ],
+        ignore_index=True,
+    )
+
+    combined_peo_separation = pd.concat(
+        [
+            result["peo_eo_separation"]
+            for result in results.values()
+        ],
+        ignore_index=True,
+    )
+
+    combined_cluster_distribution = pd.concat(
+        [
+            result["cluster_distribution"]
+            for result in results.values()
+        ],
+        ignore_index=True,
+    )
+
+    combined_block_means = pd.concat(
+        [
+            result["block_means"]
+            for result in results.values()
+        ],
+        ignore_index=True,
+    )
+
+    # --------------------------------------------------------
+    # Save combined tables
+    # --------------------------------------------------------
+
+    combined_overall_summary.to_csv(
+        OUTPUT_DIR
+        / "ALL_structural_summary.csv",
+        index=False,
+    )
+
+    combined_state_summary.to_csv(
+        OUTPUT_DIR
+        / "ALL_coordination_state_summary.csv",
+        index=False,
+    )
+
+    combined_coordination_distribution.to_csv(
+        OUTPUT_DIR
+        / "ALL_coordination_distributions.csv",
+        index=False,
+    )
+
+    combined_joint_coordination.to_csv(
+        OUTPUT_DIR
+        / "ALL_joint_peo_tfsi_coordination.csv",
+        index=False,
+    )
+
+    combined_denticity.to_csv(
+        OUTPUT_DIR
+        / "ALL_tfsi_denticity.csv",
+        index=False,
+    )
+
+    combined_tfsi_bridging.to_csv(
+        OUTPUT_DIR
+        / "ALL_tfsi_metals_per_anion.csv",
+        index=False,
+    )
+
+    combined_peo_occupancy.to_csv(
+        OUTPUT_DIR
+        / "ALL_peo_metals_per_chain.csv",
+        index=False,
+    )
+
+    combined_peo_separation.to_csv(
+        OUTPUT_DIR
+        / "ALL_peo_eo_separation.csv",
+        index=False,
+    )
+
+    combined_cluster_distribution.to_csv(
+        OUTPUT_DIR
+        / "ALL_cluster_size_distributions.csv",
+        index=False,
+    )
+
+    combined_block_means.to_csv(
+        OUTPUT_DIR
+        / "ALL_block_means.csv",
+        index=False,
+    )
+
+    # --------------------------------------------------------
+    # Combined manuscript plots
+    # --------------------------------------------------------
+
+    make_combined_state_plot(
+        combined_state_summary
+    )
+
+    make_combined_metric_plot(
+        combined_overall_summary,
+        metric="mean_peo_oxygen_cn",
+        ylabel="Mean PEO oxygen coordination number",
+        filename="combined_peo_oxygen_cn",
+    )
+
+    make_combined_metric_plot(
+        combined_overall_summary,
+        metric="mean_tfsi_molecular_cn",
+        ylabel="Mean number of TFSI molecules per metal",
+        filename="combined_tfsi_molecular_cn",
+    )
+
+    make_combined_metric_plot(
+        combined_overall_summary,
+        metric="fraction_metals_tfsi_bridged",
+        ylabel="Fraction of metals in TFSI bridges",
+        filename="combined_tfsi_bridging",
+    )
+
+    make_combined_metric_plot(
+        combined_overall_summary,
+        metric="fraction_metals_shared_peo_chain",
+        ylabel="Fraction of metals sharing a PEO chain",
+        filename="combined_peo_chain_sharing",
+    )
+
+    make_combined_metric_plot(
+        combined_overall_summary,
+        metric="fraction_metals_local_peo_bridged",
+        ylabel="Fraction of metals in local PEO bridges",
+        filename="combined_local_peo_bridging",
+    )
+
+    make_combined_metric_plot(
+        combined_overall_summary,
+        metric="fraction_metals_in_multi_metal_clusters",
+        ylabel="Fraction of metals in multi-metal clusters",
+        filename="combined_multi_metal_cluster_fraction",
+    )
+
+    make_combined_metric_plot(
+        combined_overall_summary,
+        metric="mean_cluster_metals_weight_average",
+        ylabel="Metal-weighted mean cluster size",
+        filename="combined_weight_average_cluster_size",
+    )
+
+    print("\n" + "=" * 78)
+    print("STRUCTURAL SUMMARY COMPLETED")
+    print("=" * 78)
+
+    print(
+        f"Results saved in:\n{OUTPUT_DIR.resolve()}"
+    )
+
+
+if __name__ == "__main__":
+    main()
