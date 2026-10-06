@@ -41,6 +41,7 @@ REQUIRED_COLUMNS = (
     "metal_atom_id", "tfsi_denticity",
 )
 
+
 def build_parser():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--master-db", type=Path, default=None)
@@ -50,8 +51,11 @@ def build_parser():
     p.add_argument("--frame-interval-ps", type=float, default=DEFAULT_FRAME_INTERVAL_PS)
     p.add_argument("--giant-threshold", type=float, default=DEFAULT_GIANT_THRESHOLD,
                    help="Largest-component metal-fraction threshold for graph giant-component proxy")
+    p.add_argument("--metal-charge-number", type=float, default=1.0,
+                   help="Formal metal-ion charge number used only for the labeled metal/anion subnetwork charge")
     p.add_argument("--overwrite", action="store_true")
     return p
+
 
 def configure_logger(path: Path) -> logging.Logger:
     logger = logging.getLogger("cluster_network")
@@ -63,6 +67,7 @@ def configure_logger(path: Path) -> logging.Logger:
     fh = logging.FileHandler(path, mode="w", encoding="utf-8"); fh.setFormatter(fmt); logger.addHandler(fh)
     return logger
 
+
 def prepare_output_dir(path: Path, overwrite: bool) -> Path:
     path = path.expanduser().resolve()
     if path.exists():
@@ -70,6 +75,7 @@ def prepare_output_dir(path: Path, overwrite: bool) -> Path:
         elif any(path.iterdir()): raise FileExistsError(f"Output exists: {path}; use --overwrite")
     path.mkdir(parents=True, exist_ok=True)
     return path
+
 
 def parse_json_dictionary(value: Any) -> Dict[str, Any]:
     if value is None: return {}
@@ -81,11 +87,13 @@ def parse_json_dictionary(value: Any) -> Dict[str, Any]:
     if not isinstance(parsed, dict): raise ValueError("tfsi_denticity must contain a JSON dictionary")
     return parsed
 
+
 def infer_target_from_working_directory() -> Tuple[Optional[str], Optional[str]]:
     text = str(Path.cwd()).replace("\\", "/")
     m = re.search(r"(?<!\d)(20_5|15_10|15_15|5_20)(?!\d)", text)
     comp = m.group(1) if m else None
     return None, comp
+
 
 def read_database_identity(path: Path) -> Tuple[str, str, str]:
     try:
@@ -95,6 +103,7 @@ def read_database_identity(path: Path) -> Tuple[str, str, str]:
         return "", "", ""
     if first.empty: return "", "", ""
     return tuple(map(str, first.iloc[0].tolist()))
+
 
 def database_candidates(root: Path) -> List[Path]:
     patterns = (
@@ -108,6 +117,7 @@ def database_candidates(root: Path) -> List[Path]:
         for p in root.glob(pat):
             if p.is_file(): out.add(p.resolve())
     return sorted(out)
+
 
 def resolve_master_database(explicit: Optional[Path]) -> Path:
     if explicit is not None:
@@ -126,6 +136,7 @@ def resolve_master_database(explicit: Optional[Path]) -> Path:
     if len(matches) == 1: return matches[0]
     raise RuntimeError("Could not uniquely identify database; use --master-db\n" + "\n".join(map(str, candidates)))
 
+
 class UnionFind:
     def __init__(self):
         self.parent = {}; self.rank = {}
@@ -142,15 +153,19 @@ class UnionFind:
         self.parent[rb] = ra
         if self.rank[ra] == self.rank[rb]: self.rank[ra] += 1
 
+
 def safe_fraction(a, b): return float(a / b) if b else np.nan
 
-def analyze_frame(frame_df, frame_value, time_ps, giant_threshold):
+
+def analyze_frame(frame_df, frame_value, time_ps, giant_threshold, metal_charge_number):
     uf = UnionFind(); edges = set(); metals = set()
     metal_degree = Counter(); tfsi_degree = Counter()
+
     for row in frame_df.itertuples(index=False):
         mid = int(row.metal_atom_id); metals.add(mid); uf.add(("M", mid))
         for tid_raw in parse_json_dictionary(row.tfsi_denticity):
             edges.add((mid, int(tid_raw)))
+
     for mid, tid in edges:
         uf.union(("M", mid), ("T", tid))
         metal_degree[mid] += 1; tfsi_degree[tid] += 1
@@ -173,7 +188,7 @@ def analyze_frame(frame_df, frame_value, time_ps, giant_threshold):
         component_rows.append({
             "frame": frame_value, "time_ps": time_ps, "component_id": cid,
             "n_metals": nm, "n_tfsi": nt, "component_size_nodes": size,
-            "formal_M_TFSI_subnetwork_charge_e": 2*nm - nt,
+            "formal_M_TFSI_subnetwork_charge_e": metal_charge_number*nm - nt,
             "is_multimetal_aggregate": is_agg,
         })
 
@@ -209,6 +224,7 @@ def analyze_frame(frame_df, frame_value, time_ps, giant_threshold):
     }
     return component_rows, frame_row, Counter(metal_degree.values()), Counter(tfsi_degree.values())
 
+
 def main():
     args = build_parser().parse_args()
     if not 0 < args.giant_threshold <= 1: raise ValueError("--giant-threshold must be in (0,1]")
@@ -240,14 +256,14 @@ def main():
         carry = chunk[chunk["frame"] == last_frame].copy()
         complete = chunk[chunk["frame"] != last_frame]
         for f, fdf in complete.groupby("frame", sort=False):
-            cr, fr, md, td = analyze_frame(fdf, int(f), float(fdf["time_ps"].iloc[0]), args.giant_threshold)
+            cr, fr, md, td = analyze_frame(fdf, int(f), float(fdf["time_ps"].iloc[0]), args.giant_threshold, args.metal_charge_number)
             all_components.extend(cr); all_frames.append(fr); md_total.update(md); td_total.update(td)
         if chunk_idx == 1 or chunk_idx % 10 == 0:
             logger.info("Chunk %d | rows=%d | completed frames=%d", chunk_idx, rows_read, len(all_frames))
 
     if not carry.empty:
         f = int(carry["frame"].iloc[0])
-        cr, fr, md, td = analyze_frame(carry, f, float(carry["time_ps"].iloc[0]), args.giant_threshold)
+        cr, fr, md, td = analyze_frame(carry, f, float(carry["time_ps"].iloc[0]), args.giant_threshold, args.metal_charge_number)
         all_components.extend(cr); all_frames.append(fr); md_total.update(md); td_total.update(td)
 
     if identity is None: raise RuntimeError("Empty database")
@@ -295,7 +311,7 @@ def main():
     overall = {"system":system,"metal_species":metal,"composition":composition,"n_rows_read":rows_read,"n_frames":len(frame_df),
                "aggregate_definition":"connected component with >=2 metals",
                "cluster_size_definition":"n_metals+n_coordinated_TFSI",
-               "formal_charge_definition":"2*n_metals-n_TFSI (M/TFSI subnetwork only)",
+               "formal_charge_definition":f"{args.metal_charge_number:g}*n_metals-n_TFSI (metal/anion subnetwork only)",
                "giant_component_proxy_threshold_metal_fraction":args.giant_threshold,
                "giant_component_proxy_probability":float(frame_df["giant_component_proxy"].mean()),
                "largest_component_metal_fraction_max":float(frame_df["largest_component_metal_fraction"].max())}
