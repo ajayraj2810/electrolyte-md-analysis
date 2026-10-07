@@ -997,7 +997,8 @@ def summarize_transitions(
                 block_all["transition_type"] == transition_type
             )
             fraction = safe_fraction(block_count, len(block_all))
-            fractions.append(fraction)            block_rows.append(
+            fractions.append(fraction)
+            block_rows.append(
                 {
                     "block_index": block,
                     "transition_type": transition_type,
