@@ -997,7 +997,8 @@ def compute_event_lag_statistics(
                 "formation_class": str(
                     event_row["formation_class"]
                 ),
-                "completed_event": int(                    event_row["completed_event"]
+                "completed_event": int(
+                    event_row["completed_event"]
                 ),
                 "left_censored": int(
                     event_row["left_censored"]
@@ -1996,7 +1997,8 @@ def summarize_key_lags(
                 "relative_motion_ratio": float(
                     row["relative_motion_ratio"]
                 ),
-                "mean_directional_cosine": float(                    row["mean_directional_cosine"]
+                "mean_directional_cosine": float(
+                    row["mean_directional_cosine"]
                 ),
             }
         )
