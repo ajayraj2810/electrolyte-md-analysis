@@ -997,7 +997,8 @@ def cluster_event_statistics(
     fraction_percolating_frames = (
         n_percolating_frames / n if n else 0.0
     )
-    maximum_winding_rank = (        int(max(buffer.winding_rank))
+    maximum_winding_rank = (
+        int(max(buffer.winding_rank))
         if buffer.winding_rank
         else 0
     )
@@ -1996,7 +1997,8 @@ def make_figures(
             save_plot(
                 fig,
                 paths.figures / "aggregate_event_lifetime_distribution.png",
-                cfg.figure_dpi,            )
+                cfg.figure_dpi,
+            )
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
