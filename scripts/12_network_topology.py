@@ -1,6 +1,309 @@
 #!/usr/bin/env python3
-"""Command-line entry point for electrolyte_md.modules.network_topology."""
-from electrolyte_md.modules.network_topology import main
+
+from __future__ import annotations
+import argparse, json, logging, math, re, shutil, sys
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import numpy as np
+import pandas as pd
+
+DEFAULT_OUTPUT_DIR = Path("09_cluster_network_topology")
+DEFAULT_CHUNK_SIZE = 200_000
+DEFAULT_BLOCK_NS = 10.0
+DEFAULT_FRAME_INTERVAL_PS = 10.0
+DEFAULT_GIANT_THRESHOLD = 0.50
+
+REQUIRED_COLUMNS = (
+    "system", "metal_species", "composition", "frame", "time_ps",
+    "metal_atom_id", "tfsi_denticity",
+)
+
+def build_parser():
+    p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument("--master-db", type=Path, default=None)
+    p.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    p.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
+    p.add_argument("--block-ns", type=float, default=DEFAULT_BLOCK_NS)
+    p.add_argument("--frame-interval-ps", type=float, default=DEFAULT_FRAME_INTERVAL_PS)
+    p.add_argument("--giant-threshold", type=float, default=DEFAULT_GIANT_THRESHOLD,
+                   help="Largest-component metal-fraction threshold for graph giant-component proxy")
+    p.add_argument("--metal-charge-number", type=float, default=1.0,
+                   help="Formal metal-ion charge number used only for the labeled metal/anion subnetwork charge")
+    p.add_argument("--overwrite", action="store_true")
+    return p
+
+def configure_logger(path: Path) -> logging.Logger:
+    logger = logging.getLogger("cluster_network")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear(); logger.propagate = False
+    fmt = logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s",
+                            datefmt="%Y-%m-%d %H:%M:%S")
+    sh = logging.StreamHandler(sys.stdout); sh.setFormatter(fmt); logger.addHandler(sh)
+    fh = logging.FileHandler(path, mode="w", encoding="utf-8"); fh.setFormatter(fmt); logger.addHandler(fh)
+    return logger
+
+def prepare_output_dir(path: Path, overwrite: bool) -> Path:
+    path = path.expanduser().resolve()
+    if path.exists():
+        if overwrite: shutil.rmtree(path)
+        elif any(path.iterdir()): raise FileExistsError(f"Output exists: {path}; use --overwrite")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+def parse_json_dictionary(value: Any) -> Dict[str, Any]:
+    if value is None: return {}
+    if isinstance(value, float) and np.isnan(value): return {}
+    if isinstance(value, dict): return value
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null", "{}"}: return {}
+    parsed = json.loads(text)
+    if not isinstance(parsed, dict): raise ValueError("tfsi_denticity must contain a JSON dictionary")
+    return parsed
+
+def infer_target_from_working_directory() -> Tuple[Optional[str], Optional[str]]:
+    text = str(Path.cwd()).replace("\\", "/")
+    m = re.search(r"(?<!\d)(20_5|15_10|15_15|5_20)(?!\d)", text)
+    comp = m.group(1) if m else None
+    return None, comp
+
+def read_database_identity(path: Path) -> Tuple[str, str, str]:
+    try:
+        first = pd.read_csv(path, compression="infer",
+                            usecols=["system", "metal_species", "composition"], nrows=1)
+    except Exception:
+        return "", "", ""
+    if first.empty: return "", "", ""
+    return tuple(map(str, first.iloc[0].tolist()))
+
+def database_candidates(root: Path) -> List[Path]:
+    patterns = (
+        "coordination_database/*/master_coordination_*.csv.gz",
+        "coordination_database/master_coordination_*.csv.gz",
+        "**/coordination_database/*/master_coordination_*.csv.gz",
+        "**/coordination_database/master_coordination_*.csv.gz",
+    )
+    out: Set[Path] = set()
+    for pat in patterns:
+        for p in root.glob(pat):
+            if p.is_file(): out.add(p.resolve())
+    return sorted(out)
+
+def resolve_master_database(explicit: Optional[Path]) -> Path:
+    if explicit is not None:
+        p = explicit.expanduser().resolve()
+        if not p.exists(): raise FileNotFoundError(f"Master database not found: {p}")
+        return p
+    candidates = database_candidates(Path.cwd())
+    if not candidates: raise FileNotFoundError("No master_coordination_*.csv.gz found; use --master-db")
+    if len(candidates) == 1: return candidates[0]
+    target_metal, target_comp = infer_target_from_working_directory()
+    matches = []
+    for p in candidates:
+        _, metal, comp = read_database_identity(p)
+        if (target_metal is None or metal.lower() == target_metal.lower()) and (target_comp is None or comp == target_comp):
+            matches.append(p)
+    if len(matches) == 1: return matches[0]
+    raise RuntimeError("Could not uniquely identify database; use --master-db\n" + "\n".join(map(str, candidates)))
+
+class UnionFind:
+    def __init__(self):
+        self.parent = {}; self.rank = {}
+    def add(self, x):
+        if x not in self.parent: self.parent[x] = x; self.rank[x] = 0
+    def find(self, x):
+        if self.parent[x] != x: self.parent[x] = self.find(self.parent[x])
+        return self.parent[x]
+    def union(self, a, b):
+        self.add(a); self.add(b)
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb: return
+        if self.rank[ra] < self.rank[rb]: ra, rb = rb, ra
+        self.parent[rb] = ra
+        if self.rank[ra] == self.rank[rb]: self.rank[ra] += 1
+
+def safe_fraction(a, b): return float(a / b) if b else np.nan
+
+def analyze_frame(frame_df, frame_value, time_ps, giant_threshold, metal_charge_number):
+    uf = UnionFind(); edges = set(); metals = set()
+    metal_degree = Counter(); tfsi_degree = Counter()
+
+    for row in frame_df.itertuples(index=False):
+        mid = int(row.metal_atom_id); metals.add(mid); uf.add(("M", mid))
+        for tid_raw in parse_json_dictionary(row.tfsi_denticity):
+            edges.add((mid, int(tid_raw)))
+
+    for mid, tid in edges:
+        uf.union(("M", mid), ("T", tid))
+        metal_degree[mid] += 1; tfsi_degree[tid] += 1
+    for mid in metals: metal_degree[mid] += 0
+
+    comps = defaultdict(list)
+    for node in uf.parent: comps[uf.find(node)].append(node)
+
+    component_rows = []
+    aggregate_sizes = []; aggregate_metal_counts = []
+    metal_in_aggregates = 0
+    max_nm = 0; max_size = 0
+
+    for cid, nodes in enumerate(comps.values()):
+        nm = sum(k == "M" for k, _ in nodes); nt = sum(k == "T" for k, _ in nodes)
+        size = nm + nt; is_agg = nm >= 2
+        if is_agg:
+            aggregate_sizes.append(size); aggregate_metal_counts.append(nm); metal_in_aggregates += nm
+        max_nm = max(max_nm, nm); max_size = max(max_size, size)
+        component_rows.append({
+            "frame": frame_value, "time_ps": time_ps, "component_id": cid,
+            "n_metals": nm, "n_tfsi": nt, "component_size_nodes": size,
+            "formal_M_TFSI_subnetwork_charge_e": metal_charge_number*nm - nt,
+            "is_multimetal_aggregate": is_agg,
+        })
+
+    total_graph_nodes = sum(len(v) for v in comps.values())
+    nmet = len(metals)
+    if aggregate_sizes:
+        mean_size = float(np.mean(aggregate_sizes))
+        ion_weighted = safe_fraction(sum(s*s for s in aggregate_sizes), sum(aggregate_sizes))
+        metal_weighted = safe_fraction(sum(s*nm for s, nm in zip(aggregate_sizes, aggregate_metal_counts)), sum(aggregate_metal_counts))
+    else:
+        mean_size = ion_weighted = metal_weighted = np.nan
+
+    lmf = safe_fraction(max_nm, nmet)
+    frame_row = {
+        "frame": frame_value, "time_ps": time_ps,
+        "n_metals_total": nmet, "n_coordinated_tfsi_nodes": len(tfsi_degree),
+        "n_components": len(comps),
+        "n_multimetal_components": sum(r["is_multimetal_aggregate"] for r in component_rows),
+        "fraction_metals_in_multimetal_aggregates": safe_fraction(metal_in_aggregates, nmet),
+        "mean_multimetal_aggregate_size_number_weighted": mean_size,
+        "ion_weighted_multimetal_aggregate_size_nodes": ion_weighted,
+        "metal_weighted_multimetal_aggregate_size_nodes": metal_weighted,
+        "largest_component_n_metals": max_nm,
+        "largest_component_size_nodes": max_size,
+        "largest_component_metal_fraction": lmf,
+        "largest_component_graph_node_fraction": safe_fraction(max_size, total_graph_nodes),
+        "giant_component_proxy": bool(np.isfinite(lmf) and lmf >= giant_threshold),
+        "mean_metal_degree_to_tfsi": float(np.mean(list(metal_degree.values()))) if metal_degree else np.nan,
+        "mean_tfsi_degree_to_metals": float(np.mean(list(tfsi_degree.values()))) if tfsi_degree else np.nan,
+        "fraction_tfsi_bridging_ge2_metals": safe_fraction(sum(d >= 2 for d in tfsi_degree.values()), len(tfsi_degree)),
+        "fraction_tfsi_branching_ge3_metals": safe_fraction(sum(d >= 3 for d in tfsi_degree.values()), len(tfsi_degree)),
+        "fraction_metals_degree_ge3_tfsi": safe_fraction(sum(d >= 3 for d in metal_degree.values()), len(metal_degree)),
+    }
+    return component_rows, frame_row, Counter(metal_degree.values()), Counter(tfsi_degree.values())
+
+def main():
+    args = build_parser().parse_args()
+    if not 0 < args.giant_threshold <= 1: raise ValueError("--giant-threshold must be in (0,1]")
+    database = resolve_master_database(args.master_db)
+    out = prepare_output_dir(args.output_dir, args.overwrite)
+    logger = configure_logger(out / "09_cluster_network_topology.log")
+
+    cols = pd.read_csv(database, compression="infer", nrows=0).columns
+    missing = [c for c in REQUIRED_COLUMNS if c not in cols]
+    if missing: raise ValueError(f"Missing required columns: {missing}")
+
+    identity = None; carry = pd.DataFrame(); rows_read = 0
+    all_components = []; all_frames = []; md_total = Counter(); td_total = Counter()
+
+    reader = pd.read_csv(database, compression="infer", usecols=list(REQUIRED_COLUMNS),
+                         chunksize=args.chunk_size, low_memory=False)
+    for chunk_idx, chunk in enumerate(reader, 1):
+        rows_read += len(chunk)
+        if identity is None and len(chunk):
+            identity = (str(chunk.iloc[0].system), str(chunk.iloc[0].metal_species), str(chunk.iloc[0].composition))
+        chunk["frame"] = pd.to_numeric(chunk["frame"], errors="raise").astype(np.int64)
+        chunk["time_ps"] = pd.to_numeric(chunk["time_ps"], errors="coerce")
+        chunk["metal_atom_id"] = pd.to_numeric(chunk["metal_atom_id"], errors="raise").astype(np.int64)
+        bad = ~np.isfinite(chunk["time_ps"].to_numpy(float))
+        if np.any(bad): chunk.loc[bad, "time_ps"] = chunk.loc[bad, "frame"] * args.frame_interval_ps
+        if not carry.empty:
+            chunk = pd.concat([carry, chunk], ignore_index=True); carry = pd.DataFrame()
+        last_frame = int(chunk["frame"].iloc[-1])
+        carry = chunk[chunk["frame"] == last_frame].copy()
+        complete = chunk[chunk["frame"] != last_frame]
+        for f, fdf in complete.groupby("frame", sort=False):
+            cr, fr, md, td = analyze_frame(fdf, int(f), float(fdf["time_ps"].iloc[0]), args.giant_threshold, args.metal_charge_number)
+            all_components.extend(cr); all_frames.append(fr); md_total.update(md); td_total.update(td)
+        if chunk_idx == 1 or chunk_idx % 10 == 0:
+            logger.info("Chunk %d | rows=%d | completed frames=%d", chunk_idx, rows_read, len(all_frames))
+
+    if not carry.empty:
+        f = int(carry["frame"].iloc[0])
+        cr, fr, md, td = analyze_frame(carry, f, float(carry["time_ps"].iloc[0]), args.giant_threshold, args.metal_charge_number)
+        all_components.extend(cr); all_frames.append(fr); md_total.update(md); td_total.update(td)
+
+    if identity is None: raise RuntimeError("Empty database")
+    system, metal, composition = identity
+    comp_df = pd.DataFrame(all_components); frame_df = pd.DataFrame(all_frames)
+    for df in (comp_df, frame_df):
+        df.insert(0, "composition", composition); df.insert(0, "metal_species", metal); df.insert(0, "system", system)
+
+    agg = comp_df[comp_df["is_multimetal_aggregate"]].copy()
+    size_rows = []
+    if len(agg):
+        counts = agg["component_size_nodes"].value_counts().sort_index(); nclusters = counts.sum(); nnodes = sum(int(s)*int(c) for s,c in counts.items())
+        for size, count in counts.items():
+            size_rows.append({"system":system,"metal_species":metal,"composition":composition,
+                              "component_size_nodes":int(size),"component_count":int(count),
+                              "number_weighted_probability":float(count/nclusters),
+                              "ion_weighted_probability":float(size*count/nnodes)})
+    size_df = pd.DataFrame(size_rows)
+
+    compdist = (agg.groupby(["n_metals","n_tfsi","formal_M_TFSI_subnetwork_charge_e"]).size().reset_index(name="count") if len(agg) else pd.DataFrame())
+    if len(compdist):
+        compdist["probability"] = compdist["count"] / compdist["count"].sum()
+        compdist.insert(0,"composition",composition); compdist.insert(0,"metal_species",metal); compdist.insert(0,"system",system)
+
+    deg_rows = []
+    for node_type, counter in (("metal", md_total), ("TFSI", td_total)):
+        total = sum(counter.values())
+        for d in sorted(counter):
+            deg_rows.append({"system":system,"metal_species":metal,"composition":composition,
+                             "node_type":node_type,"degree":int(d),"count":int(counter[d]),
+                             "probability":safe_fraction(counter[d], total)})
+    degree_df = pd.DataFrame(deg_rows)
+
+    frame_df["block_index"] = np.floor((frame_df["time_ps"]/1000.0)/args.block_ns).astype(int)
+    metrics = ["fraction_metals_in_multimetal_aggregates","ion_weighted_multimetal_aggregate_size_nodes",
+               "metal_weighted_multimetal_aggregate_size_nodes","largest_component_metal_fraction",
+               "largest_component_graph_node_fraction","mean_metal_degree_to_tfsi","mean_tfsi_degree_to_metals",
+               "fraction_tfsi_bridging_ge2_metals","fraction_tfsi_branching_ge3_metals","fraction_metals_degree_ge3_tfsi"]
+    block_df = frame_df.groupby("block_index")[metrics].mean().reset_index()
+    giant = frame_df.groupby("block_index")["giant_component_proxy"].mean().reset_index(name="giant_component_proxy_probability")
+    block_df = block_df.merge(giant,on="block_index",how="left")
+    block_df.insert(0,"composition",composition); block_df.insert(0,"metal_species",metal); block_df.insert(0,"system",system)
+    block_df["block_start_ns"] = block_df["block_index"]*args.block_ns; block_df["block_end_ns"]=(block_df["block_index"]+1)*args.block_ns
+
+    overall = {"system":system,"metal_species":metal,"composition":composition,"n_rows_read":rows_read,"n_frames":len(frame_df),
+               "aggregate_definition":"connected component with >=2 metals",
+               "cluster_size_definition":"n_metals+n_coordinated_TFSI",
+               "formal_charge_definition":f"{args.metal_charge_number:g}*n_metals-n_TFSI (metal/anion subnetwork only)",
+               "giant_component_proxy_threshold_metal_fraction":args.giant_threshold,
+               "giant_component_proxy_probability":float(frame_df["giant_component_proxy"].mean()),
+               "largest_component_metal_fraction_max":float(frame_df["largest_component_metal_fraction"].max())}
+    for m in metrics:
+        overall[m+"_mean"] = float(frame_df[m].mean())
+        overall[m+"_std_over_frames"] = float(frame_df[m].std(ddof=1))
+
+    pd.DataFrame([overall]).to_csv(out/"overall_summary.csv",index=False,float_format="%.10g")
+    frame_df.to_csv(out/"cluster_frame_summary.csv",index=False,float_format="%.10g")
+    comp_df.to_csv(out/"cluster_component_table.csv",index=False,float_format="%.10g")
+    size_df.to_csv(out/"cluster_size_distribution.csv",index=False,float_format="%.10g")
+    compdist.to_csv(out/"cluster_composition_distribution.csv",index=False,float_format="%.10g")
+    degree_df.to_csv(out/"degree_distribution.csv",index=False,float_format="%.10g")
+    block_df.to_csv(out/"block_summary.csv",index=False,float_format="%.10g")
+    with open(out/"validation_report.json","w") as fh:
+        json.dump({"status":"PASSED","identity":identity,"n_rows_read":rows_read,"n_frames_processed":len(frame_df),
+                   "notes":["All metals retained including degree-zero metals.","Only coordinated TFSI appear as graph nodes.",
+                            "Multi-metal aggregate means >=2 metals.","Formal charge is only for M/TFSI subnetwork; EMIM excluded.",
+                            "Giant-component metric is not a rigorous periodic box-spanning test."]},fh,indent=2)
+
+    logger.info("Mean fraction metals in aggregates : %.5f", overall["fraction_metals_in_multimetal_aggregates_mean"])
+    logger.info("Mean ion-weighted aggregate size   : %.5f", overall["ion_weighted_multimetal_aggregate_size_nodes_mean"])
+    logger.info("Mean largest-component metal frac : %.5f", overall["largest_component_metal_fraction_mean"])
+    logger.info("Giant-component proxy probability : %.5f", overall["giant_component_proxy_probability"])
+    logger.info("Output directory: %s", out)
 
 if __name__ == "__main__":
     main()
