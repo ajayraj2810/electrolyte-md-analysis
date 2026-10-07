@@ -997,7 +997,8 @@ def build_pair_identity_summary(
                 "metal_id": int(group["metal_id"].iloc[0]),
                 "metal_resid": int(group["metal_resid"].iloc[0]),
                 "tfsi_resid": int(group["tfsi_resid"].iloc[0]),
-                "n_pair_events": int(len(group)),                "n_reformation_events": int(
+                "n_pair_events": int(len(group)),
+                "n_reformation_events": int(
                     group["reformation_event"].sum()
                 ),
                 "n_completed_events": int(
@@ -1996,7 +1997,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(DEFAULT_INPUT_DIR),
         help="Directory containing Parts 1 + 2 outputs.",
-    )    parser.add_argument(
+    )
+    parser.add_argument(
         "--chunk-size",
         type=int,
         default=DEFAULT_CHUNK_SIZE,
