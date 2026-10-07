@@ -997,7 +997,8 @@ def make_system_coordination_plot(
             f"{metal}, composition {composition}"
         )
 
-        ax.set_ylim(bottom=0)        ax.grid(alpha=0.25)
+        ax.set_ylim(bottom=0)
+        ax.grid(alpha=0.25)
 
         fig.tight_layout()
 
