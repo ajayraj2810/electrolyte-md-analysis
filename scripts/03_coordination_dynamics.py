@@ -1,34 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Module 3: Coordination Dynamics
-
-Run this script from inside one metal folder, for example:
-
-    path/to/system/
-
-The script automatically searches the current folder and all subfolders for:
-
-    master_coordination_*.csv.gz
-    tfsi_bridging_*.csv.gz
-
-It calculates:
-
-    - Continuous contact lifetimes
-    - Intermittent contact lifetimes
-    - PEO oxygen residence
-    - PEO chain residence
-    - TFSI oxygen residence
-    - TFSI molecule residence
-    - P/PT/T/F state residence
-    - State transitions
-    - Ligand exchange frequencies
-    - TFSI bridge lifetimes
-    - Block-averaged uncertainties
-    - Survival functions
-
-All source text is ASCII-compatible to avoid encoding errors.
-"""
-
 from pathlib import Path
 from collections import Counter, defaultdict
 import json
@@ -36,40 +5,19 @@ import json
 import numpy as np
 import pandas as pd
 
-
-# ============================================================
-# USER SETTINGS
-# ============================================================
-
-# The script uses the folder from which it is executed.
 WORK_DIR = Path.cwd()
 
-# Output will be created inside the current system folder.
 OUTPUT_DIR = WORK_DIR / "coordination_dynamics"
 
-# Saved trajectory-frame interval.
 FRAME_INTERVAL_PS = 10.0
 
-# Number of blocks for uncertainty calculations.
 N_BLOCKS = 5
 
-# A contact may disappear for this many saved frames and still count
-# as one intermittent contact.
-#
-# 2 frames x 10 ps/frame = 20 ps tolerance.
 GAP_TOLERANCE_FRAMES = 2
 
-# Remove an initial trajectory fraction when necessary.
-# Use 0.0 for the complete trajectory.
 DISCARD_INITIAL_FRACTION = 0.0
 
-# Minimum number of events needed to generate a survival curve.
 MIN_EVENTS_FOR_SURVIVAL = 5
-
-
-# ============================================================
-# CONTACT DEFINITIONS
-# ============================================================
 
 CONTACT_TYPES = {
     "peo_oxygen": "peo_oxygen_atom_ids",
@@ -77,7 +25,6 @@ CONTACT_TYPES = {
     "tfsi_oxygen": "tfsi_oxygen_atom_ids",
     "tfsi_molecule": "tfsi_resids",
 }
-
 
 MASTER_USE_COLUMNS = [
     "system",
@@ -94,7 +41,6 @@ MASTER_USE_COLUMNS = [
     "tfsi_resids",
 ]
 
-
 STRING_COLUMNS = {
     "system": "string",
     "metal_species": "string",
@@ -106,21 +52,10 @@ STRING_COLUMNS = {
     "tfsi_resids": "string",
 }
 
-
-# ============================================================
-# FILE DISCOVERY
-# ============================================================
-
 def find_single_file(pattern):
-    """
-    Search recursively below the current folder.
-
-    Raises a clear error when no file or multiple files are found.
-    """
 
     matches = sorted(WORK_DIR.rglob(pattern))
 
-    # Do not accidentally read files created inside Module 3 output.
     matches = [
         path
         for path in matches
@@ -151,11 +86,7 @@ def find_single_file(pattern):
 
     return matches[0]
 
-
 def find_optional_file(pattern):
-    """
-    Find one optional file. Return None if not found.
-    """
 
     matches = sorted(WORK_DIR.rglob(pattern))
 
@@ -179,11 +110,7 @@ def find_optional_file(pattern):
 
     return matches[0]
 
-
 def find_input_files():
-    """
-    Locate the Module 1 files inside the current system folder.
-    """
 
     master_file = find_single_file(
         "master_coordination_*.csv.gz"
@@ -195,20 +122,7 @@ def find_input_files():
 
     return master_file, bridge_file
 
-
-# ============================================================
-# GENERAL HELPERS
-# ============================================================
-
 def parse_id_set(value):
-    """
-    Convert a semicolon-separated string into a set of integers.
-
-    Examples
-    --------
-    "41;42;45" -> {41, 42, 45}
-    empty value -> set()
-    """
 
     if pd.isna(value):
         return set()
@@ -238,11 +152,7 @@ def parse_id_set(value):
 
     return output
 
-
 def discard_initial_frames(dataframe, fraction):
-    """
-    Remove an initial fraction of trajectory frames.
-    """
 
     if fraction <= 0.0:
         return dataframe.copy()
@@ -268,11 +178,7 @@ def discard_initial_frames(dataframe, fraction):
         dataframe["frame"].isin(retained_frames)
     ].copy()
 
-
 def create_frame_block_mapping(frames, number_of_blocks):
-    """
-    Divide unique frames into contiguous blocks.
-    """
 
     unique_frames = np.sort(
         np.unique(frames)
@@ -300,20 +206,10 @@ def create_frame_block_mapping(frames, number_of_blocks):
 
     return mapping
 
-
 def create_presence_runs(
     present_frames,
     gap_tolerance_frames,
 ):
-    """
-    Convert frames where a contact is present into residence events.
-
-    Continuous:
-        gap_tolerance_frames = 0
-
-    Intermittent:
-        gap_tolerance_frames > 0
-    """
 
     frames = sorted(
         set(int(frame) for frame in present_frames)
@@ -354,21 +250,13 @@ def create_presence_runs(
 
     return runs
 
-
 def duration_frames(start_frame, end_frame):
-    """
-    Inclusive number of saved frames.
-    """
 
     return int(
         end_frame - start_frame + 1
     )
 
-
 def duration_ps(start_frame, end_frame):
-    """
-    Event duration based on saved-frame count.
-    """
 
     return (
         duration_frames(
@@ -378,14 +266,10 @@ def duration_ps(start_frame, end_frame):
         * FRAME_INTERVAL_PS
     )
 
-
 def calculate_kaplan_meier(
     durations,
     right_censored,
 ):
-    """
-    Calculate a simple Kaplan-Meier survival function.
-    """
 
     durations = np.asarray(
         durations,
@@ -476,15 +360,7 @@ def calculate_kaplan_meier(
 
     return pd.DataFrame(rows)
 
-
-# ============================================================
-# LOAD MASTER DATABASE
-# ============================================================
-
 def read_master_database(master_file):
-    """
-    Read only columns needed for Module 3.
-    """
 
     print("\nReading master database:")
     print(master_file)
@@ -546,16 +422,7 @@ def read_master_database(master_file):
 
     return master
 
-
-# ============================================================
-# CONTACT RESIDENCE EVENTS
-# ============================================================
-
 def build_contact_presence(master, partner_column):
-    """
-    Construct:
-        (metal index, partner ID) -> list of presence frames
-    """
 
     presence = defaultdict(list)
 
@@ -583,7 +450,6 @@ def build_contact_presence(master, partner_column):
 
     return presence
 
-
 def build_contact_events(
     master,
     contact_type,
@@ -598,9 +464,6 @@ def build_contact_events(
     composition,
     metal_atom_lookup,
 ):
-    """
-    Build continuous or intermittent contact-lifetime events.
-    """
 
     presence = build_contact_presence(
         master,
@@ -677,11 +540,6 @@ def build_contact_events(
 
     return pd.DataFrame(rows)
 
-
-# ============================================================
-# STATE RESIDENCE EVENTS
-# ============================================================
-
 def build_state_events(
     master,
     first_frame,
@@ -691,9 +549,6 @@ def build_state_events(
     metal,
     composition,
 ):
-    """
-    Build contiguous P, PT, T, and F state events.
-    """
 
     rows = []
 
@@ -818,22 +673,12 @@ def build_state_events(
 
     return pd.DataFrame(rows)
 
-
-# ============================================================
-# STATE TRANSITIONS
-# ============================================================
-
 def build_state_transition_table(
     master,
     system,
     metal,
     composition,
 ):
-    """
-    Calculate transition counts between consecutive saved frames.
-
-    Both self-transitions and state-changing transitions are stored.
-    """
 
     state_order = [
         "P",
@@ -933,11 +778,6 @@ def build_state_transition_table(
 
     return pd.DataFrame(rows)
 
-
-# ============================================================
-# LIGAND EXCHANGE
-# ============================================================
-
 def build_exchange_events(
     master,
     frame_to_block,
@@ -945,9 +785,6 @@ def build_exchange_events(
     metal,
     composition,
 ):
-    """
-    Compare coordination partners in consecutive frames.
-    """
 
     rows = []
 
@@ -997,7 +834,8 @@ def build_exchange_events(
                 )
 
                 current_set = parse_id_set(
-                    current[column]                )
+                    current[column]
+                )
 
                 gained = (
                     current_set - previous_set
@@ -1058,11 +896,6 @@ def build_exchange_events(
 
     return pd.DataFrame(rows)
 
-
-# ============================================================
-# TFSI BRIDGE LIFETIMES
-# ============================================================
-
 def build_tfsi_bridge_events(
     bridge_file,
     event_definition,
@@ -1074,9 +907,6 @@ def build_tfsi_bridge_events(
     metal,
     composition,
 ):
-    """
-    Calculate lifetimes of TFSI molecules bridging two or more metals.
-    """
 
     if bridge_file is None:
         return pd.DataFrame()
@@ -1167,8 +997,7 @@ def build_tfsi_bridge_events(
                         right_censored
                     ),
                     "censored": int(
-                        left_censored
-                        or right_censored
+                        left_censored                        or right_censored
                     ),
                     "start_block": frame_to_block[
                         start_frame
@@ -1178,18 +1007,10 @@ def build_tfsi_bridge_events(
 
     return pd.DataFrame(rows)
 
-
-# ============================================================
-# EVENT SUMMARIES
-# ============================================================
-
 def summarize_events(
     events,
     grouping_columns,
 ):
-    """
-    Create overall residence-time summaries.
-    """
 
     if events.empty:
         return pd.DataFrame()
@@ -1255,14 +1076,10 @@ def summarize_events(
 
     return pd.DataFrame(rows)
 
-
 def calculate_block_summary(
     events,
     grouping_columns,
 ):
-    """
-    Calculate mean event lifetimes within each trajectory block.
-    """
 
     if events.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -1357,14 +1174,10 @@ def calculate_block_summary(
         pd.DataFrame(summary_rows),
     )
 
-
 def create_survival_tables(
     events,
     grouping_columns,
 ):
-    """
-    Generate survival functions for each contact/state category.
-    """
 
     if events.empty:
         return pd.DataFrame()
@@ -1413,11 +1226,6 @@ def create_survival_tables(
         ignore_index=True,
     )
 
-
-# ============================================================
-# SAVE CONTACT ANALYSIS
-# ============================================================
-
 def run_contact_lifetime_analysis(
     master,
     output_dir,
@@ -1429,9 +1237,6 @@ def run_contact_lifetime_analysis(
     composition,
     metal_atom_lookup,
 ):
-    """
-    Run all four contact-lifetime analyses.
-    """
 
     event_tables = []
 
@@ -1546,11 +1351,6 @@ def run_contact_lifetime_analysis(
         index=False,
     )
 
-
-# ============================================================
-# SAVE STATE ANALYSIS
-# ============================================================
-
 def run_state_analysis(
     master,
     output_dir,
@@ -1561,9 +1361,6 @@ def run_state_analysis(
     metal,
     composition,
 ):
-    """
-    Calculate state lifetimes and transition statistics.
-    """
 
     print(
         "Calculating coordination-state residence times..."
@@ -1647,11 +1444,6 @@ def run_state_analysis(
         index=False,
     )
 
-
-# ============================================================
-# SAVE EXCHANGE ANALYSIS
-# ============================================================
-
 def run_exchange_analysis(
     master,
     output_dir,
@@ -1660,9 +1452,6 @@ def run_exchange_analysis(
     metal,
     composition,
 ):
-    """
-    Calculate exchange frequencies for all contact types.
-    """
 
     print(
         "Calculating ligand-exchange statistics..."
@@ -1730,8 +1519,6 @@ def run_exchange_analysis(
         / block_summary["n_observations"]
     )
 
-    # This is the number of saved intervals containing at least one
-    # exchange, normalized per metal-ns of observation.
     block_summary[
         "exchange_steps_per_metal_ns"
     ] = (
@@ -1809,11 +1596,6 @@ def run_exchange_analysis(
         index=False,
     )
 
-
-# ============================================================
-# SAVE BRIDGE ANALYSIS
-# ============================================================
-
 def run_bridge_analysis(
     bridge_file,
     output_dir,
@@ -1824,9 +1606,6 @@ def run_bridge_analysis(
     metal,
     composition,
 ):
-    """
-    Calculate continuous and intermittent TFSI bridge lifetimes.
-    """
 
     if bridge_file is None:
         print(
@@ -1929,11 +1708,6 @@ def run_bridge_analysis(
         index=False,
     )
 
-
-# ============================================================
-# MAIN
-# ============================================================
-
 def main():
 
     print("=" * 78)
@@ -1996,7 +1770,8 @@ def main():
         N_BLOCKS,
     )
 
-    metal_atom_lookup = (        master[
+    metal_atom_lookup = (
+        master[
             [
                 "metal_local_index",
                 "metal_atom_id",
@@ -2122,7 +1897,6 @@ def main():
 
     print("\nResults saved in:")
     print(OUTPUT_DIR)
-
 
 if __name__ == "__main__":
     main()
