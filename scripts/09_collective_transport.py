@@ -997,7 +997,8 @@ def calculate_nernst_einstein(
             "composition": identity.composition, "species": "TOTAL",
             "number_of_ions": sum(counts.values()), "charge_number_formal": np.nan,
             "D_nm2_ns": np.nan, "sigma_NE_formal_mS_cm": np.nan,
-            "sigma_NE_model_mS_cm": np.nan, "fraction_of_sigma_NE_formal": np.nan,        })
+            "sigma_NE_model_mS_cm": np.nan, "fraction_of_sigma_NE_formal": np.nan,
+        })
         return pd.DataFrame(rows)
 
     rows: list[dict[str, float | str]] = []
