@@ -997,7 +997,8 @@ def process_trajectory(
                 logger.info(
                     "Progress %6.2f%% | %d/%d frames | frame=%d | "
                     "pairs=%d | contacts=%d | elapsed=%s | ETA=%s",
-                    percent,                    selected_index,
+                    percent,
+                    selected_index,
                     n_selected,
                     frame,
                     n_pairs,
