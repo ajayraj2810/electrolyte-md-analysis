@@ -1,79 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-05E1_finalize_pair_database.py
-==============================
-
-Module 5E1 — Metal–TFSI Pair Database Builder
-Part 3: final event analysis, cross-validation, population convergence,
-censoring-aware pair lifetimes, distributions, and publication-ready figures.
-
-This script does NOT read the LAMMPS trajectory. It uses only the outputs from
-05E1_build_pair_database.py Parts 1 + 2:
-
-Required inputs
----------------
-05E1_pair_database/
-├── pair_database.csv.gz
-├── frame_pair_summary.csv
-├── validation_report.json
-└── metadata.json
-
-Outputs
--------
-05E1_pair_database/
-├── pair_event_summary.csv
-├── pair_identity_summary.csv
-├── pair_lifetime_summary.csv
-├── pair_population_block_summary.csv
-├── pair_population_equilibration_sensitivity.csv
-├── pair_population_autocorrelation.csv
-├── metal_oxygen_distance_histogram.csv
-├── oxygen_multiplicity_summary.csv
-├── distance_outliers.csv
-├── pair_survival_probability.csv
-├── final_validation_report.json
-├── part3_summary.json
-└── figures/
-    ├── pair_population_vs_time.png
-    ├── pair_population_block_average.png
-    ├── pair_count_distribution.png
-    ├── pair_population_autocorrelation.png
-    ├── pair_lifetime_distribution.png
-    ├── pair_survival_probability.png
-    ├── oxygen_multiplicity_distribution.png
-    └── metal_oxygen_distance_distribution.png
-
-Lifetime conventions
---------------------
-n_observed_frames
-    Number of saved frames in which the pair event is present.
-
-observed_span_ps
-    (last_frame - first_frame) × frame_interval_ps. A one-frame event has a
-    span of zero.
-
-occupancy_time_ps
-    n_observed_frames × effective_frame_interval_ps. This is used for event
-    lifetime distributions and Kaplan–Meier survival analysis because every
-    observed event has at least one sampling interval of exposure.
-
-Censoring
----------
-left_censored
-    The pair is already present in the first selected frame; its true start is
-    unknown.
-
-right_censored
-    The pair remains present in the final selected frame; its true end is
-    unknown.
-
-Kaplan–Meier analysis excludes left-censored events because standard
-right-censored Kaplan–Meier estimation cannot correctly incorporate unknown
-start times. Right-censored events that are not left-censored are retained.
-
-Author: Ajay Dwivedi
-"""
 
 from __future__ import annotations
 
@@ -98,11 +23,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
-
-# =============================================================================
-# DEFAULTS
-# =============================================================================
 
 DEFAULT_INPUT_DIR = "05E1_pair_database"
 DEFAULT_CHUNK_SIZE = 200_000
@@ -153,11 +73,6 @@ REQUIRED_FRAME_COLUMNS = [
     "mean_min_pair_distance_A",
 ]
 
-
-# =============================================================================
-# DATA CLASSES
-# =============================================================================
-
 @dataclass(frozen=True)
 class Part3Config:
     input_dir: Path
@@ -185,7 +100,6 @@ class Part3Config:
             raise ValueError("distance_histogram_bins must be at least 20.")
         if self.figure_dpi < 72:
             raise ValueError("figure_dpi must be at least 72.")
-
 
 @dataclass
 class FinalValidationReport:
@@ -220,7 +134,6 @@ class FinalValidationReport:
     def to_dict(self) -> Dict[str, Any]:
         self.finalize()
         return make_json_safe(asdict(self))
-
 
 @dataclass
 class EventAccumulator:
@@ -289,7 +202,6 @@ class EventAccumulator:
 
         self.n_new_pair_flags += int(new_pair_event)
         self.n_continuing_pair_flags += int(continuing_pair)
-
 
 class OutputPaths:
     def __init__(self, root: Path) -> None:
@@ -384,11 +296,6 @@ class OutputPaths:
             for path in existing:
                 path.unlink()
 
-
-# =============================================================================
-# GENERAL HELPERS
-# =============================================================================
-
 def configure_logging(log_file: Path) -> logging.Logger:
     logger = logging.getLogger("05E1_part3")
     logger.setLevel(logging.INFO)
@@ -410,7 +317,6 @@ def configure_logging(log_file: Path) -> logging.Logger:
 
     return logger
 
-
 def make_json_safe(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
@@ -430,7 +336,6 @@ def make_json_safe(value: Any) -> Any:
         return None
     return value
 
-
 def write_json(path: Path, payload: Mapping[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as handle:
@@ -438,11 +343,9 @@ def write_json(path: Path, payload: Mapping[str, Any]) -> None:
         handle.write("\n")
     temporary.replace(path)
 
-
 def read_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
-
 
 def require_columns(
     dataframe_columns: Iterable[str],
@@ -454,11 +357,9 @@ def require_columns(
     if missing:
         raise ValueError(f"{label} is missing required columns: {missing}")
 
-
 def extract_event_number(pair_instance_id: str) -> Optional[int]:
     match = re.search(r"_E(\d+)$", str(pair_instance_id))
     return int(match.group(1)) if match else None
-
 
 def safe_weighted_mean(
     values: pd.Series,
@@ -478,14 +379,12 @@ def safe_weighted_mean(
         / np.sum(weights_array[valid])
     )
 
-
 def percentile_or_nan(values: np.ndarray, percentile: float) -> float:
     values = np.asarray(values, dtype=float)
     values = values[np.isfinite(values)]
     if values.size == 0:
         return np.nan
     return float(np.percentile(values, percentile))
-
 
 def linear_trend(
     time_ns: np.ndarray,
@@ -529,7 +428,6 @@ def linear_trend(
         "net_change_over_window": float(slope * (x[-1] - x[0])),
     }
 
-
 def autocorrelation_fft(values: np.ndarray) -> np.ndarray:
     x = np.asarray(values, dtype=float)
     x = x[np.isfinite(x)]
@@ -555,14 +453,7 @@ def autocorrelation_fft(values: np.ndarray) -> np.ndarray:
     autocovariance = raw / normalization
     return autocovariance / autocovariance[0]
 
-
 def integrated_autocorrelation_time(acf: np.ndarray) -> float:
-    """
-    Initial-positive-sequence estimate in frames.
-
-    Returns tau_int = 0.5 + sum_{lag >= 1} acf(lag) until the first
-    nonpositive value.
-    """
 
     if acf.size == 0 or not np.isfinite(acf[0]):
         return np.nan
@@ -574,16 +465,10 @@ def integrated_autocorrelation_time(acf: np.ndarray) -> float:
         tau += float(value)
     return float(tau)
 
-
 def kaplan_meier(
     durations_ps: np.ndarray,
     event_observed: np.ndarray,
 ) -> pd.DataFrame:
-    """
-    Standard Kaplan–Meier estimator for right-censored observations.
-
-    Left-censored events must be excluded before calling this function.
-    """
 
     durations = np.asarray(durations_ps, dtype=float)
     observed = np.asarray(event_observed, dtype=bool)
@@ -633,7 +518,6 @@ def kaplan_meier(
 
     return pd.DataFrame(records, columns=columns)
 
-
 def median_survival_time(km_df: pd.DataFrame) -> float:
     if km_df.empty:
         return np.nan
@@ -641,11 +525,6 @@ def median_survival_time(km_df: pd.DataFrame) -> float:
     if below.empty:
         return np.nan
     return float(below.iloc[0]["time_ps"])
-
-
-# =============================================================================
-# INPUT SETUP
-# =============================================================================
 
 def resolve_input_paths(input_dir: Path) -> Dict[str, Path]:
     paths = {
@@ -660,14 +539,12 @@ def resolve_input_paths(input_dir: Path) -> Dict[str, Path]:
 
     return paths
 
-
 def read_pair_header(pair_database: Path) -> List[str]:
     return pd.read_csv(
         pair_database,
         compression="gzip",
         nrows=0,
     ).columns.tolist()
-
 
 def resolve_metadata(
     metadata: Mapping[str, Any],
@@ -711,11 +588,6 @@ def resolve_metadata(
         "n_tfsi_residues": int(topology.get("n_tfsi_residues", 0)),
     }
 
-
-# =============================================================================
-# STREAMING PAIR DATABASE ANALYSIS
-# =============================================================================
-
 def initialize_distance_histogram(
     cutoff_A: float,
     n_bins: int,
@@ -724,7 +596,6 @@ def initialize_distance_histogram(
     edges = np.linspace(0.0, upper, n_bins + 1)
     counts = np.zeros(n_bins, dtype=np.int64)
     return edges, counts
-
 
 def stream_pair_database(
     pair_database: Path,
@@ -738,13 +609,6 @@ def stream_pair_database(
     pd.DataFrame,
     Dict[str, Any],
 ]:
-    """
-    Stream the large pair database and create:
-      - event-level accumulators,
-      - distance histogram,
-      - oxygen multiplicity counts,
-      - distance-outlier table.
-    """
 
     usecols = REQUIRED_PAIR_COLUMNS
     dtypes = {
@@ -997,7 +861,8 @@ def stream_pair_database(
                 "minimum_distance_A": accumulator.min_distance_A,
                 "maximum_min_distance_A": (
                     accumulator.max_min_distance_A
-                ),                "mean_contact_distance_A": (
+                ),
+                "mean_contact_distance_A": (
                     accumulator.sum_mean_distance_A
                     / accumulator.n_rows
                 ),
@@ -1108,11 +973,6 @@ def stream_pair_database(
         streaming_metrics,
     )
 
-
-# =============================================================================
-# EVENT AND IDENTITY SUMMARIES
-# =============================================================================
-
 def build_pair_identity_summary(
     event_df: pd.DataFrame,
     n_selected_frames: int,
@@ -1137,8 +997,7 @@ def build_pair_identity_summary(
                 "metal_id": int(group["metal_id"].iloc[0]),
                 "metal_resid": int(group["metal_resid"].iloc[0]),
                 "tfsi_resid": int(group["tfsi_resid"].iloc[0]),
-                "n_pair_events": int(len(group)),
-                "n_reformation_events": int(
+                "n_pair_events": int(len(group)),                "n_reformation_events": int(
                     group["reformation_event"].sum()
                 ),
                 "n_completed_events": int(
@@ -1210,7 +1069,6 @@ def build_pair_identity_summary(
     )
     return result
 
-
 def summarize_lifetime_subset(
     label: str,
     subset: pd.DataFrame,
@@ -1257,7 +1115,6 @@ def summarize_lifetime_subset(
         ),
     }
 
-
 def build_lifetime_summary(event_df: pd.DataFrame) -> pd.DataFrame:
     subsets = [
         ("all_events", event_df),
@@ -1293,11 +1150,6 @@ def build_lifetime_summary(event_df: pd.DataFrame) -> pd.DataFrame:
             for label, subset in subsets
         ]
     )
-
-
-# =============================================================================
-# POPULATION ANALYSIS
-# =============================================================================
 
 def analyze_population(
     frame_summary_path: Path,
@@ -1609,11 +1461,6 @@ def analyze_population(
         population_summary,
     )
 
-
-# =============================================================================
-# FIGURES
-# =============================================================================
-
 def configure_matplotlib() -> None:
     plt.rcParams.update(
         {
@@ -1628,11 +1475,9 @@ def configure_matplotlib() -> None:
         }
     )
 
-
 def save_and_close(fig: plt.Figure, path: Path, dpi: int) -> None:
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
-
 
 def plot_pair_population(
     frame_df: pd.DataFrame,
@@ -1673,7 +1518,6 @@ def plot_pair_population(
     axis.grid(alpha=0.25)
     save_and_close(fig, outputs.figure_population, config.figure_dpi)
 
-
 def plot_population_blocks(
     block_df: pd.DataFrame,
     outputs: OutputPaths,
@@ -1703,7 +1547,6 @@ def plot_population_blocks(
         config.figure_dpi,
     )
 
-
 def plot_pair_count_distribution(
     frame_df: pd.DataFrame,
     outputs: OutputPaths,
@@ -1729,7 +1572,6 @@ def plot_pair_count_distribution(
         config.figure_dpi,
     )
 
-
 def plot_population_acf(
     acf_df: pd.DataFrame,
     outputs: OutputPaths,
@@ -1752,7 +1594,6 @@ def plot_population_acf(
         outputs.figure_population_acf,
         config.figure_dpi,
     )
-
 
 def plot_lifetime_distribution(
     event_df: pd.DataFrame,
@@ -1807,7 +1648,6 @@ def plot_lifetime_distribution(
         config.figure_dpi,
     )
 
-
 def plot_survival_probability(
     km_df: pd.DataFrame,
     outputs: OutputPaths,
@@ -1849,7 +1689,6 @@ def plot_survival_probability(
         config.figure_dpi,
     )
 
-
 def plot_oxygen_multiplicity(
     multiplicity_df: pd.DataFrame,
     outputs: OutputPaths,
@@ -1874,7 +1713,6 @@ def plot_oxygen_multiplicity(
         outputs.figure_oxygen_multiplicity,
         config.figure_dpi,
     )
-
 
 def plot_distance_distribution(
     distance_histogram_df: pd.DataFrame,
@@ -1905,11 +1743,6 @@ def plot_distance_distribution(
         outputs.figure_distance_distribution,
         config.figure_dpi,
     )
-
-
-# =============================================================================
-# VALIDATION AND SUMMARY
-# =============================================================================
 
 def compare_with_part2_validation(
     part2_validation: Mapping[str, Any],
@@ -1996,7 +1829,8 @@ def compare_with_part2_validation(
         "n_unique_pair_identities",
         event_df["pair_id"].nunique(),
     )
-    report.add_metric(        "n_completed_events",
+    report.add_metric(
+        "n_completed_events",
         int(event_df["completed_event"].sum()),
     )
     report.add_metric(
@@ -2041,7 +1875,6 @@ def compare_with_part2_validation(
             f"{int(event_df['fully_censored'].sum())} pair event(s) span the "
             "entire selected trajectory and are both left- and right-censored."
         )
-
 
 def add_population_validation(
     population_summary: Mapping[str, Any],
@@ -2149,11 +1982,6 @@ def add_population_validation(
                 "over the selected trajectory."
             )
 
-
-# =============================================================================
-# CLI
-# =============================================================================
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -2168,8 +1996,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(DEFAULT_INPUT_DIR),
         help="Directory containing Parts 1 + 2 outputs.",
-    )
-    parser.add_argument(
+    )    parser.add_argument(
         "--chunk-size",
         type=int,
         default=DEFAULT_CHUNK_SIZE,
@@ -2219,7 +2046,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     return parser
 
-
 def config_from_args(args: argparse.Namespace) -> Part3Config:
     config = Part3Config(
         input_dir=args.input_dir.resolve(),
@@ -2238,11 +2064,6 @@ def config_from_args(args: argparse.Namespace) -> Part3Config:
     )
     config.validate()
     return config
-
-
-# =============================================================================
-# MAIN
-# =============================================================================
 
 def main() -> None:
     parser = build_parser()
@@ -2282,7 +2103,7 @@ def main() -> None:
     logger.info("Metal species       : %s", resolved["metal_species"])
     logger.info("Composition         : %s", resolved["composition"])
     logger.info(
-        "Temperature         : %.2f metal",
+        "Temperature         : %.2f K",
         resolved["temperature_K"],
     )
     logger.info(
@@ -2669,7 +2490,6 @@ def main() -> None:
         "Runtime                  : %.2f s",
         time.perf_counter() - overall_start,
     )
-
 
 if __name__ == "__main__":
     main()
