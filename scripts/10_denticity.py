@@ -1,6 +1,1625 @@
 #!/usr/bin/env python3
-"""Command-line entry point for electrolyte_md.modules.denticity."""
-from electrolyte_md.modules.denticity import main
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import math
+import re
+import shutil
+import sys
+import time
+from collections import Counter, defaultdict
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+DEFAULT_OUTPUT_DIR = Path("07_denticity")
+DEFAULT_CHUNK_SIZE = 200_000
+DEFAULT_BLOCK_NS = 10.0
+DEFAULT_FRAME_INTERVAL_PS = 10.0
+DEFAULT_FIGURE_DPI = 300
+
+REQUIRED_COLUMNS = (
+    "system",
+    "metal_species",
+    "composition",
+    "frame",
+    "time_ps",
+    "metal_atom_id",
+    "n_peo_oxygen",
+    "n_peo_chains",
+    "peo_chain_eo_mapping",
+    "n_tfsi_oxygen",
+    "n_tfsi_molecules",
+    "tfsi_denticity",
+)
+
+@dataclass
+class ValidationReport:
+    status: str
+    checks: Dict[str, bool]
+    metrics: Dict[str, Any]
+    warnings: List[str]
+    errors: List[str]
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Calculate TFSI and PEO-chain denticity directly from the "
+            "master coordination database without reading the trajectory."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    parser.add_argument(
+        "--master-db",
+        type=Path,
+        default=None,
+        help=(
+            "Path to master_coordination_<system>.csv.gz. When omitted, "
+            "the script searches coordination_database recursively."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=DEFAULT_CHUNK_SIZE,
+    )
+    parser.add_argument(
+        "--block-ns",
+        type=float,
+        default=DEFAULT_BLOCK_NS,
+    )
+    parser.add_argument(
+        "--frame-interval-ps",
+        type=float,
+        default=DEFAULT_FRAME_INTERVAL_PS,
+        help=(
+            "Used only when time_ps is absent or invalid. The database "
+            "created by Module 01 normally contains time_ps."
+        ),
+    )
+    parser.add_argument(
+        "--figure-dpi",
+        type=int,
+        default=DEFAULT_FIGURE_DPI,
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+    )
+    return parser
+
+def configure_logger(path: Path) -> logging.Logger:
+    logger = logging.getLogger("denticity")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.propagate = False
+
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    stream = logging.StreamHandler(sys.stdout)
+    stream.setFormatter(formatter)
+    logger.addHandler(stream)
+
+    file_handler = logging.FileHandler(
+        path,
+        mode="w",
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    return logger
+
+def prepare_output_dir(path: Path, overwrite: bool) -> Path:
+    path = path.expanduser().resolve()
+
+    if path.exists():
+        has_results = any(
+            (path / filename).exists()
+            for filename in (
+                "denticity_distribution.csv",
+                "denticity_summary.csv",
+                "validation_report.json",
+            )
+        )
+
+        if has_results and not overwrite:
+            raise FileExistsError(
+                f"Output directory already contains results: {path}\n"
+                "Use --overwrite to replace them."
+            )
+
+        if overwrite:
+            shutil.rmtree(path)
+
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "figures").mkdir(exist_ok=True)
+    return path
+
+def json_safe(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, Mapping):
+        return {
+            str(key): json_safe(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+def write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(json_safe(payload), handle, indent=2)
+        handle.write("\n")
+    temporary.replace(path)
+
+def safe_fraction(numerator: float, denominator: float) -> float:
+    return float(numerator / denominator) if denominator else np.nan
+
+def standard_error(values: Sequence[float]) -> float:
+    array = np.asarray(values, dtype=float)
+    array = array[np.isfinite(array)]
+    if array.size < 2:
+        return np.nan
+    return float(np.std(array, ddof=1) / math.sqrt(array.size))
+
+def parse_json_dictionary(value: Any) -> Dict[str, Any]:
+
+    if value is None:
+        return {}
+
+    if isinstance(value, float) and np.isnan(value):
+        return {}
+
+    if isinstance(value, dict):
+        return value
+
+    text = str(value).strip()
+
+    if not text or text.lower() in {
+        "nan",
+        "none",
+        "null",
+        "{}",
+    }:
+        return {}
+
+    parsed = json.loads(text)
+
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"Expected a JSON dictionary but found {type(parsed).__name__}: "
+            f"{text[:100]}"
+        )
+
+    return parsed
+
+def infer_target_from_working_directory() -> Tuple[Optional[str], Optional[str]]:
+
+    text = str(Path.cwd()).replace("\\", "/")
+    match = re.search(r"(?<!\d)(20_5|15_10|15_15|5_20)(?!\d)", text)
+    return None, (match.group(1) if match else None)
+
+def read_database_identity(path: Path) -> Tuple[str, str, str]:
+    columns = [
+        "system",
+        "metal_species",
+        "composition",
+    ]
+
+    try:
+        first = pd.read_csv(
+            path,
+            compression="infer",
+            usecols=columns,
+            nrows=1,
+        )
+    except Exception:
+        return "", "", ""
+
+    if first.empty:
+        return "", "", ""
+
+    return (
+        str(first.iloc[0]["system"]),
+        str(first.iloc[0]["metal_species"]),
+        str(first.iloc[0]["composition"]),
+    )
+
+def database_candidates(root: Path) -> List[Path]:
+    patterns = (
+        "coordination_database/*/master_coordination_*.csv.gz",
+        "coordination_database/master_coordination_*.csv.gz",
+        "**/coordination_database/*/master_coordination_*.csv.gz",
+        "**/coordination_database/master_coordination_*.csv.gz",
+    )
+
+    candidates: List[Path] = []
+    for pattern in patterns:
+        candidates.extend(root.glob(pattern))
+
+    return sorted(
+        {
+            path.resolve()
+            for path in candidates
+            if path.is_file()
+        }
+    )
+
+def resolve_master_database(explicit: Optional[Path]) -> Path:
+    if explicit is not None:
+        path = explicit.expanduser().resolve()
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Master coordination database not found: {path}"
+            )
+        return path
+
+    candidates = database_candidates(Path.cwd())
+
+    if not candidates:
+        raise FileNotFoundError(
+            "No master coordination database was found.\n"
+            "Expected a file such as:\n"
+            "  coordination_database/Ca_comp4/"
+            "master_coordination_example_system.csv.gz\n\n"
+            "List your database files with:\n"
+            "  find coordination_database -type f -name "
+            "'master_coordination_*.csv.gz'\n\n"
+            "Then supply the exact file using --master-db."
+        )
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    target_metal, target_composition = (
+        infer_target_from_working_directory()
+    )
+
+    matching: List[Path] = []
+    identities: List[Tuple[Path, str, str, str]] = []
+
+    for path in candidates:
+        system, metal, composition = read_database_identity(path)
+        identities.append((path, system, metal, composition))
+
+        metal_match = (
+            target_metal is None
+            or metal.lower() == target_metal.lower()
+        )
+        composition_match = (
+            target_composition is None
+            or composition == target_composition
+        )
+
+        if metal_match and composition_match:
+            matching.append(path)
+
+    if len(matching) == 1:
+        return matching[0]
+
+    details = "\n".join(
+        f"  - {path} | system={system}, metal={metal}, "
+        f"composition={composition}"
+        for path, system, metal, composition in identities
+    )
+
+    if len(matching) > 1:
+        raise RuntimeError(
+            "More than one master database matches the current directory.\n"
+            f"Current inferred metal={target_metal}, "
+            f"composition={target_composition}\n"
+            "Supply the intended file explicitly with --master-db.\n\n"
+            f"Candidates:\n{details}"
+        )
+
+    raise RuntimeError(
+        "Master databases were found, but none matches the metal and "
+        "composition inferred from the current directory.\n"
+        f"Current inferred metal={target_metal}, "
+        f"composition={target_composition}\n"
+        "Supply the intended file explicitly with --master-db.\n\n"
+        f"Candidates:\n{details}"
+    )
+
+def update_denticity_counter(
+    ligand_counts: Counter,
+    block_counts: Dict[int, Counter],
+    block: int,
+    denticity: int,
+) -> None:
+    ligand_counts[int(denticity)] += 1
+    block_counts[int(block)][int(denticity)] += 1
+
+def analyze_database(
+    database: Path,
+    chunk_size: int,
+    block_ns: float,
+    frame_interval_ps: float,
+    logger: logging.Logger,
+) -> Tuple[
+    Counter,
+    Counter,
+    Dict[int, Counter],
+    Dict[int, Counter],
+    Dict[int, Dict[str, float]],
+    Dict[str, Any],
+]:
+    available_columns = list(
+        pd.read_csv(
+            database,
+            compression="infer",
+            nrows=0,
+        ).columns
+    )
+
+    missing = [
+        column
+        for column in REQUIRED_COLUMNS
+        if column not in available_columns
+    ]
+
+    if missing:
+        raise ValueError(
+            "The selected file is not the master database produced by "
+            "01_build_master_coordination_database.py.\n"
+            f"Missing required columns: {missing}\n\n"
+            "Available columns:\n"
+            + "\n".join(f"  - {column}" for column in available_columns)
+        )
+
+    usecols = list(REQUIRED_COLUMNS)
+
+    tfsi_counts: Counter = Counter()
+    peo_counts: Counter = Counter()
+    tfsi_block_counts: Dict[int, Counter] = defaultdict(Counter)
+    peo_block_counts: Dict[int, Counter] = defaultdict(Counter)
+
+    block_frame_values: Dict[int, Dict[str, float]] = defaultdict(
+        lambda: {
+            "n_metal_frames": 0,
+            "n_peo_coordinated_frames": 0,
+            "n_tfsi_coordinated_frames": 0,
+            "sum_peo_oxygen_cn": 0.0,
+            "sum_peo_chain_cn": 0.0,
+            "sum_tfsi_oxygen_cn": 0.0,
+            "sum_tfsi_molecular_cn": 0.0,
+            "sum_max_peo_chain_denticity": 0.0,
+            "sum_max_tfsi_denticity": 0.0,
+        }
+    )
+
+    n_rows = 0
+    n_invalid_time = 0
+    n_invalid_peo_json = 0
+    n_invalid_tfsi_json = 0
+    n_peo_value_mismatches = 0
+    n_tfsi_value_mismatches = 0
+    n_tfsi_above_four = 0
+    n_nonpositive_peo = 0
+    n_nonpositive_tfsi = 0
+
+    identity: Optional[Tuple[str, str, str]] = None
+    start = time.perf_counter()
+
+    reader = pd.read_csv(
+        database,
+        compression="infer",
+        usecols=usecols,
+        chunksize=chunk_size,
+        low_memory=False,
+    )
+
+    for chunk_index, chunk in enumerate(reader, start=1):
+        if identity is None and len(chunk):
+            identity = (
+                str(chunk.iloc[0]["system"]),
+                str(chunk.iloc[0]["metal_species"]),
+                str(chunk.iloc[0]["composition"]),
+            )
+
+        time_ps = pd.to_numeric(
+            chunk["time_ps"],
+            errors="coerce",
+        ).to_numpy(dtype=float, copy=True)
+
+        frame = pd.to_numeric(
+            chunk["frame"],
+            errors="coerce",
+        ).to_numpy(dtype=float, copy=True)
+
+        invalid_time = ~np.isfinite(time_ps)
+        if np.any(invalid_time):
+            time_ps[invalid_time] = (
+                frame[invalid_time] * frame_interval_ps
+            )
+        n_invalid_time += int(np.sum(~np.isfinite(time_ps)))
+
+        n_peo_oxygen_array = pd.to_numeric(
+            chunk["n_peo_oxygen"],
+            errors="coerce",
+        ).fillna(0).astype(int).to_numpy()
+
+        n_peo_chain_array = pd.to_numeric(
+            chunk["n_peo_chains"],
+            errors="coerce",
+        ).fillna(0).astype(int).to_numpy()
+
+        n_tfsi_oxygen_array = pd.to_numeric(
+            chunk["n_tfsi_oxygen"],
+            errors="coerce",
+        ).fillna(0).astype(int).to_numpy()
+
+        n_tfsi_molecule_array = pd.to_numeric(
+            chunk["n_tfsi_molecules"],
+            errors="coerce",
+        ).fillna(0).astype(int).to_numpy()
+
+        peo_json_array = chunk[
+            "peo_chain_eo_mapping"
+        ].to_numpy(object)
+
+        tfsi_json_array = chunk[
+            "tfsi_denticity"
+        ].to_numpy(object)
+
+        for local_index in range(len(chunk)):
+            n_rows += 1
+            current_time_ps = float(time_ps[local_index])
+
+            if not np.isfinite(current_time_ps):
+                continue
+
+            block = int(
+                math.floor(
+                    (current_time_ps / 1000.0) / block_ns
+                )
+            )
+
+            block_values = block_frame_values[block]
+            block_values["n_metal_frames"] += 1
+
+            try:
+                peo_mapping = parse_json_dictionary(
+                    peo_json_array[local_index]
+                )
+            except Exception:
+                n_invalid_peo_json += 1
+                peo_mapping = {}
+
+            reconstructed_peo_oxygen_count = 0
+            maximum_peo_denticity = 0
+
+            for chain_resid, eo_indices in peo_mapping.items():
+                if isinstance(eo_indices, (list, tuple, set)):
+                    unique_eo_indices = {
+                        int(value)
+                        for value in eo_indices
+                    }
+                else:
+
+                    unique_eo_indices = set(
+                        range(int(eo_indices))
+                    )
+
+                denticity = len(unique_eo_indices)
+
+                if denticity <= 0:
+                    n_nonpositive_peo += 1
+                    continue
+
+                update_denticity_counter(
+                    peo_counts,
+                    peo_block_counts,
+                    block,
+                    denticity,
+                )
+
+                reconstructed_peo_oxygen_count += denticity
+                maximum_peo_denticity = max(
+                    maximum_peo_denticity,
+                    denticity,
+                )
+
+            expected_peo_oxygen = int(
+                n_peo_oxygen_array[local_index]
+            )
+            expected_peo_chains = int(
+                n_peo_chain_array[local_index]
+            )
+
+            if (
+                reconstructed_peo_oxygen_count
+                != expected_peo_oxygen
+                or len(peo_mapping) != expected_peo_chains
+            ):
+                n_peo_value_mismatches += 1
+
+            if expected_peo_chains > 0:
+                block_values[
+                    "n_peo_coordinated_frames"
+                ] += 1
+                block_values[
+                    "sum_peo_oxygen_cn"
+                ] += expected_peo_oxygen
+                block_values[
+                    "sum_peo_chain_cn"
+                ] += expected_peo_chains
+                block_values[
+                    "sum_max_peo_chain_denticity"
+                ] += maximum_peo_denticity
+
+            try:
+                tfsi_mapping = parse_json_dictionary(
+                    tfsi_json_array[local_index]
+                )
+            except Exception:
+                n_invalid_tfsi_json += 1
+                tfsi_mapping = {}
+
+            reconstructed_tfsi_oxygen_count = 0
+            maximum_tfsi_denticity = 0
+
+            for tfsi_resid, oxygen_count in tfsi_mapping.items():
+                denticity = int(oxygen_count)
+
+                if denticity <= 0:
+                    n_nonpositive_tfsi += 1
+                    continue
+
+                if denticity > 4:
+                    n_tfsi_above_four += 1
+
+                update_denticity_counter(
+                    tfsi_counts,
+                    tfsi_block_counts,
+                    block,
+                    denticity,
+                )
+
+                reconstructed_tfsi_oxygen_count += denticity
+                maximum_tfsi_denticity = max(
+                    maximum_tfsi_denticity,
+                    denticity,
+                )
+
+            expected_tfsi_oxygen = int(
+                n_tfsi_oxygen_array[local_index]
+            )
+            expected_tfsi_molecules = int(
+                n_tfsi_molecule_array[local_index]
+            )
+
+            if (
+                reconstructed_tfsi_oxygen_count
+                != expected_tfsi_oxygen
+                or len(tfsi_mapping) != expected_tfsi_molecules
+            ):
+                n_tfsi_value_mismatches += 1
+
+            if expected_tfsi_molecules > 0:
+                block_values[
+                    "n_tfsi_coordinated_frames"
+                ] += 1
+                block_values[
+                    "sum_tfsi_oxygen_cn"
+                ] += expected_tfsi_oxygen
+                block_values[
+                    "sum_tfsi_molecular_cn"
+                ] += expected_tfsi_molecules
+                block_values[
+                    "sum_max_tfsi_denticity"
+                ] += maximum_tfsi_denticity
+
+        if chunk_index == 1 or chunk_index % 10 == 0:
+            logger.info(
+                "Chunk %d | metal-frame rows=%d | "
+                "PEO-chain contacts=%d | TFSI contacts=%d | "
+                "elapsed=%.1f min",
+                chunk_index,
+                n_rows,
+                sum(peo_counts.values()),
+                sum(tfsi_counts.values()),
+                (time.perf_counter() - start) / 60.0,
+            )
+
+    metrics = {
+        "identity": identity,
+        "n_master_rows": n_rows,
+        "n_peo_chain_contact_observations": int(
+            sum(peo_counts.values())
+        ),
+        "n_tfsi_contact_observations": int(
+            sum(tfsi_counts.values())
+        ),
+        "n_invalid_time_rows": n_invalid_time,
+        "n_invalid_peo_json_rows": n_invalid_peo_json,
+        "n_invalid_tfsi_json_rows": n_invalid_tfsi_json,
+        "n_peo_reconstruction_mismatches": n_peo_value_mismatches,
+        "n_tfsi_reconstruction_mismatches": n_tfsi_value_mismatches,
+        "n_nonpositive_peo_denticities": n_nonpositive_peo,
+        "n_nonpositive_tfsi_denticities": n_nonpositive_tfsi,
+        "n_tfsi_denticities_above_four": n_tfsi_above_four,
+        "n_blocks": len(
+            set(tfsi_block_counts) | set(peo_block_counts)
+        ),
+    }
+
+    return (
+        peo_counts,
+        tfsi_counts,
+        peo_block_counts,
+        tfsi_block_counts,
+        block_frame_values,
+        metrics,
+    )
+
+def build_distribution_table(
+    ligand: str,
+    counts: Counter,
+    block_counts: Mapping[int, Counter],
+) -> pd.DataFrame:
+    total = sum(counts.values())
+    maximum = max(counts) if counts else 0
+    blocks = sorted(block_counts)
+    rows: List[Dict[str, Any]] = []
+
+    for denticity in range(1, maximum + 1):
+        block_probabilities = []
+
+        for block in blocks:
+            block_total = sum(block_counts[block].values())
+            block_probabilities.append(
+                safe_fraction(
+                    block_counts[block].get(denticity, 0),
+                    block_total,
+                )
+            )
+
+        finite = np.asarray(
+            [
+                value
+                for value in block_probabilities
+                if np.isfinite(value)
+            ],
+            dtype=float,
+        )
+
+        rows.append(
+            {
+                "ligand": ligand,
+                "denticity": denticity,
+                "count": int(counts.get(denticity, 0)),
+                "probability": safe_fraction(
+                    counts.get(denticity, 0),
+                    total,
+                ),
+                "block_mean_probability": (
+                    float(np.mean(finite))
+                    if finite.size
+                    else np.nan
+                ),
+                "block_std_probability": (
+                    float(np.std(finite, ddof=1))
+                    if finite.size >= 2
+                    else np.nan
+                ),
+                "block_sem_probability": (
+                    standard_error(finite)
+                ),
+                "n_blocks": int(finite.size),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+def build_block_distribution_table(
+    ligand: str,
+    block_counts: Mapping[int, Counter],
+    block_ns: float,
+) -> pd.DataFrame:
+    maximum = max(
+        (
+            max(counter)
+            for counter in block_counts.values()
+            if counter
+        ),
+        default=0,
+    )
+
+    rows = []
+
+    for block in sorted(block_counts):
+        total = sum(block_counts[block].values())
+
+        for denticity in range(1, maximum + 1):
+            count = int(
+                block_counts[block].get(denticity, 0)
+            )
+
+            rows.append(
+                {
+                    "ligand": ligand,
+                    "block_index": block,
+                    "block_start_ns": block * block_ns,
+                    "block_end_ns": (block + 1) * block_ns,
+                    "denticity": denticity,
+                    "count": count,
+                    "probability": safe_fraction(
+                        count,
+                        total,
+                    ),
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+def build_block_summary_table(
+    ligand: str,
+    block_counts: Mapping[int, Counter],
+    block_ns: float,
+) -> pd.DataFrame:
+    rows = []
+
+    for block in sorted(block_counts):
+        counter = block_counts[block]
+        total = sum(counter.values())
+
+        weighted_sum = sum(
+            denticity * count
+            for denticity, count in counter.items()
+        )
+
+        multidentate_count = sum(
+            count
+            for denticity, count in counter.items()
+            if denticity >= 2
+        )
+
+        denticity_ge_3_count = sum(
+            count
+            for denticity, count in counter.items()
+            if denticity >= 3
+        )
+
+        rows.append(
+            {
+                "ligand": ligand,
+                "block_index": block,
+                "block_start_ns": block * block_ns,
+                "block_end_ns": (block + 1) * block_ns,
+                "n_contact_observations": int(total),
+                "mean_denticity": safe_fraction(
+                    weighted_sum,
+                    total,
+                ),
+                "fraction_multidentate": safe_fraction(
+                    multidentate_count,
+                    total,
+                ),
+                "fraction_denticity_ge_3": safe_fraction(
+                    denticity_ge_3_count,
+                    total,
+                ),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+def build_ligand_summary(
+    ligand: str,
+    counts: Counter,
+    block_summary: pd.DataFrame,
+) -> Dict[str, Any]:
+    total = sum(counts.values())
+
+    weighted_sum = sum(
+        denticity * count
+        for denticity, count in counts.items()
+    )
+
+    multidentate_count = sum(
+        count
+        for denticity, count in counts.items()
+        if denticity >= 2
+    )
+
+    denticity_ge_3_count = sum(
+        count
+        for denticity, count in counts.items()
+        if denticity >= 3
+    )
+
+    mean_by_block = (
+        block_summary["mean_denticity"].to_numpy(float)
+        if len(block_summary)
+        else np.asarray([], dtype=float)
+    )
+
+    multidentate_by_block = (
+        block_summary[
+            "fraction_multidentate"
+        ].to_numpy(float)
+        if len(block_summary)
+        else np.asarray([], dtype=float)
+    )
+
+    ge3_by_block = (
+        block_summary[
+            "fraction_denticity_ge_3"
+        ].to_numpy(float)
+        if len(block_summary)
+        else np.asarray([], dtype=float)
+    )
+
+    return {
+        "ligand": ligand,
+        "n_contact_observations": int(total),
+        "mean_denticity": safe_fraction(
+            weighted_sum,
+            total,
+        ),
+        "block_std_mean_denticity": (
+            float(np.std(mean_by_block, ddof=1))
+            if mean_by_block.size >= 2
+            else np.nan
+        ),
+        "block_sem_mean_denticity": (
+            standard_error(mean_by_block)
+        ),
+        "fraction_monodentate": safe_fraction(
+            counts.get(1, 0),
+            total,
+        ),
+        "fraction_multidentate": safe_fraction(
+            multidentate_count,
+            total,
+        ),
+        "block_std_fraction_multidentate": (
+            float(
+                np.std(
+                    multidentate_by_block,
+                    ddof=1,
+                )
+            )
+            if multidentate_by_block.size >= 2
+            else np.nan
+        ),
+        "block_sem_fraction_multidentate": (
+            standard_error(multidentate_by_block)
+        ),
+        "fraction_denticity_ge_3": safe_fraction(
+            denticity_ge_3_count,
+            total,
+        ),
+        "block_sem_fraction_denticity_ge_3": (
+            standard_error(ge3_by_block)
+        ),
+        "minimum_observed_denticity": (
+            int(min(counts))
+            if counts
+            else np.nan
+        ),
+        "maximum_observed_denticity": (
+            int(max(counts))
+            if counts
+            else np.nan
+        ),
+        "n_blocks": int(len(block_summary)),
+    }
+
+def build_frame_summary_table(
+    block_frame_values: Mapping[int, Mapping[str, float]],
+    block_ns: float,
+) -> pd.DataFrame:
+    rows = []
+
+    for block in sorted(block_frame_values):
+        values = block_frame_values[block]
+
+        n_all = values["n_metal_frames"]
+        n_peo = values["n_peo_coordinated_frames"]
+        n_tfsi = values["n_tfsi_coordinated_frames"]
+
+        rows.append(
+            {
+                "block_index": block,
+                "block_start_ns": block * block_ns,
+                "block_end_ns": (block + 1) * block_ns,
+                "n_metal_frames": int(n_all),
+                "fraction_peo_coordinated": safe_fraction(
+                    n_peo,
+                    n_all,
+                ),
+                "fraction_tfsi_coordinated": safe_fraction(
+                    n_tfsi,
+                    n_all,
+                ),
+                "mean_peo_oxygen_cn_given_peo": safe_fraction(
+                    values["sum_peo_oxygen_cn"],
+                    n_peo,
+                ),
+                "mean_peo_chain_cn_given_peo": safe_fraction(
+                    values["sum_peo_chain_cn"],
+                    n_peo,
+                ),
+                "mean_max_peo_chain_denticity_given_peo": safe_fraction(
+                    values[
+                        "sum_max_peo_chain_denticity"
+                    ],
+                    n_peo,
+                ),
+                "mean_tfsi_oxygen_cn_given_tfsi": safe_fraction(
+                    values["sum_tfsi_oxygen_cn"],
+                    n_tfsi,
+                ),
+                "mean_tfsi_molecular_cn_given_tfsi": safe_fraction(
+                    values["sum_tfsi_molecular_cn"],
+                    n_tfsi,
+                ),
+                "mean_max_tfsi_denticity_given_tfsi": safe_fraction(
+                    values["sum_max_tfsi_denticity"],
+                    n_tfsi,
+                ),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+def add_identity_columns(
+    dataframe: pd.DataFrame,
+    identity: Tuple[str, str, str],
+) -> pd.DataFrame:
+    system, metal, composition = identity    result = dataframe.copy()
+    result.insert(0, "composition", composition)
+    result.insert(0, "metal_species", metal)
+    result.insert(0, "system", system)
+    return result
+
+def create_figures(
+    distribution: pd.DataFrame,
+    block_summary: pd.DataFrame,
+    ligand_summary: pd.DataFrame,
+    frame_summary: pd.DataFrame,
+    figures_dir: Path,
+    system: str,
+    dpi: int,
+) -> None:
+
+    figure, axes = plt.subplots(
+        1,
+        2,
+        figsize=(11.0, 4.8),
+    )
+
+    for axis, ligand, title in (
+        (
+            axes[0],
+            "TFSI",
+            "TFSI molecular denticity",
+        ),
+        (
+            axes[1],
+            "PEO_chain",
+            "PEO-chain denticity",
+        ),
+    ):
+        subset = distribution[
+            distribution["ligand"] == ligand
+        ]
+
+        axis.bar(
+            subset["denticity"],
+            subset["probability"],
+            yerr=subset["block_sem_probability"],
+            capsize=3,
+        )
+        axis.set_xlabel("Denticity")
+        axis.set_ylabel(
+            "Probability given a metal–ligand contact"
+        )
+        axis.set_title(title)
+        axis.set_ylim(bottom=0)
+        axis.set_xticks(
+            subset["denticity"].astype(int)
+        )
+
+    figure.suptitle(
+        f"{system}: ligand-resolved denticity"
+    )
+    figure.tight_layout()
+
+    figure.savefig(
+        figures_dir
+        / "denticity_probability_distribution.png",
+        dpi=dpi,
+        bbox_inches="tight",
+    )
+    figure.savefig(
+        figures_dir
+        / "denticity_probability_distribution.pdf",
+        bbox_inches="tight",
+    )
+    plt.close(figure)
+
+    figure, axes = plt.subplots(
+        2,
+        1,
+        figsize=(8.5, 8.0),
+        sharex=True,
+    )
+
+    for ligand, label in (
+        ("TFSI", "TFSI"),
+        ("PEO_chain", "PEO chain"),
+    ):
+        subset = block_summary[
+            block_summary["ligand"] == ligand
+        ]
+
+        centers = 0.5 * (
+            subset["block_start_ns"]
+            + subset["block_end_ns"]
+        )
+
+        axes[0].plot(
+            centers,
+            subset["mean_denticity"],
+            marker="o",
+            label=label,
+        )
+        axes[1].plot(
+            centers,
+            subset["fraction_multidentate"],
+            marker="o",
+            label=label,
+        )
+
+    axes[0].set_ylabel("Mean denticity")
+    axes[1].set_ylabel(
+        "Fraction with denticity ≥ 2"
+    )
+    axes[1].set_xlabel("Trajectory time (ns)")
+    axes[0].legend()
+    axes[1].legend()
+
+    figure.suptitle(
+        f"{system}: denticity block convergence"
+    )
+    figure.tight_layout()
+
+    figure.savefig(
+        figures_dir
+        / "denticity_block_convergence.png",
+        dpi=dpi,
+        bbox_inches="tight",
+    )
+    plt.close(figure)
+
+    ordered = (
+        ligand_summary
+        .set_index("ligand")
+        .loc[["TFSI", "PEO_chain"]]
+    )
+
+    figure, axes = plt.subplots(
+        1,
+        3,
+        figsize=(12.5, 4.4),
+    )
+
+    labels = ["TFSI", "PEO chain"]
+
+    axes[0].bar(
+        labels,
+        ordered["mean_denticity"],
+    )
+    axes[0].set_ylabel("Mean denticity")
+    axes[0].set_title("Coordinated ligands")
+
+    axes[1].bar(
+        labels,
+        ordered["fraction_multidentate"],
+    )
+    axes[1].set_ylabel(
+        "Fraction with denticity ≥ 2"
+    )
+    axes[1].set_ylim(0, 1)
+    axes[1].set_title("Multidentate population")
+
+    if len(frame_summary):
+        centers = 0.5 * (
+            frame_summary["block_start_ns"]
+            + frame_summary["block_end_ns"]
+        )
+
+        axes[2].plot(
+            centers,
+            frame_summary[
+                "mean_peo_oxygen_cn_given_peo"
+            ],
+            marker="o",
+            label="Total PEO-O CN",
+        )
+        axes[2].plot(
+            centers,
+            frame_summary[
+                "mean_max_peo_chain_denticity_given_peo"
+            ],
+            marker="s",
+            label="Maximum PEO-chain denticity",
+        )
+        axes[2].plot(
+            centers,
+            frame_summary[
+                "mean_tfsi_oxygen_cn_given_tfsi"
+            ],
+            marker="^",
+            label="Total TFSI-O CN",
+        )
+        axes[2].plot(
+            centers,
+            frame_summary[
+                "mean_max_tfsi_denticity_given_tfsi"
+            ],
+            marker="d",
+            label="Maximum TFSI denticity",
+        )
+
+        axes[2].set_xlabel("Trajectory time (ns)")
+        axes[2].set_ylabel("Mean value")
+        axes[2].legend(fontsize=8)
+
+    axes[2].set_title("Metal-centered CN and denticity")
+
+    figure.suptitle(
+        f"{system}: denticity summary"
+    )
+    figure.tight_layout()
+
+    figure.savefig(
+        figures_dir / "denticity_compact_summary.png",
+        dpi=dpi,
+        bbox_inches="tight",
+    )
+    plt.close(figure)
+
+def main() -> None:
+    args = build_parser().parse_args()
+
+    if args.chunk_size <= 0:
+        raise ValueError("--chunk-size must be positive.")
+    if args.block_ns <= 0:
+        raise ValueError("--block-ns must be positive.")
+    if args.frame_interval_ps <= 0:
+        raise ValueError(
+            "--frame-interval-ps must be positive."
+        )
+
+    master_database = resolve_master_database(
+        args.master_db
+    )
+    output_dir = prepare_output_dir(
+        args.output_dir,
+        args.overwrite,
+    )
+    logger = configure_logger(
+        output_dir / "07_denticity.log"
+    )
+
+    logger.info("=" * 79)
+    logger.info(
+        "MODULE 07: DENTICITY FROM MASTER COORDINATION DATABASE"
+    )
+    logger.info("=" * 79)
+    logger.info(
+        "Master database : %s",
+        master_database,
+    )
+    logger.info(
+        "Output directory: %s",
+        output_dir,
+    )
+    logger.info(
+        "Block length    : %.3f ns",
+        args.block_ns,
+    )
+    logger.info(
+        "Trajectory read : NO"
+    )
+
+    start = time.perf_counter()
+
+    (
+        peo_counts,
+        tfsi_counts,
+        peo_block_counts,
+        tfsi_block_counts,
+        block_frame_values,
+        metrics,
+    ) = analyze_database(
+        database=master_database,
+        chunk_size=args.chunk_size,
+        block_ns=args.block_ns,
+        frame_interval_ps=args.frame_interval_ps,
+        logger=logger,
+    )
+
+    identity = metrics["identity"]
+
+    if identity is None:
+        raise RuntimeError(
+            "The master database contains no rows."
+        )
+
+    system, metal, composition = identity
+
+    tfsi_distribution = build_distribution_table(
+        "TFSI",
+        tfsi_counts,
+        tfsi_block_counts,
+    )
+    peo_distribution = build_distribution_table(
+        "PEO_chain",
+        peo_counts,
+        peo_block_counts,
+    )
+
+    distribution = pd.concat(
+        [
+            tfsi_distribution,
+            peo_distribution,
+        ],
+        ignore_index=True,
+    )
+
+    tfsi_block_summary = build_block_summary_table(
+        "TFSI",
+        tfsi_block_counts,
+        args.block_ns,
+    )
+    peo_block_summary = build_block_summary_table(
+        "PEO_chain",
+        peo_block_counts,
+        args.block_ns,
+    )
+
+    block_summary = pd.concat(
+        [
+            tfsi_block_summary,
+            peo_block_summary,
+        ],
+        ignore_index=True,
+    )
+
+    block_distribution = pd.concat(
+        [
+            build_block_distribution_table(
+                "TFSI",
+                tfsi_block_counts,
+                args.block_ns,
+            ),
+            build_block_distribution_table(
+                "PEO_chain",
+                peo_block_counts,
+                args.block_ns,
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    ligand_summary = pd.DataFrame(
+        [
+            build_ligand_summary(
+                "TFSI",
+                tfsi_counts,
+                tfsi_block_summary,
+            ),
+            build_ligand_summary(
+                "PEO_chain",
+                peo_counts,
+                peo_block_summary,
+            ),
+        ]
+    )
+
+    frame_summary = build_frame_summary_table(
+        block_frame_values,
+        args.block_ns,
+    )
+
+    distribution = add_identity_columns(
+        distribution,
+        identity,
+    )
+    block_summary = add_identity_columns(
+        block_summary,
+        identity,
+    )
+    block_distribution = add_identity_columns(
+        block_distribution,
+        identity,
+    )
+    ligand_summary = add_identity_columns(
+        ligand_summary,
+        identity,
+    )
+    frame_summary = add_identity_columns(
+        frame_summary,
+        identity,
+    )
+
+    distribution.to_csv(
+        output_dir / "denticity_distribution.csv",
+        index=False,
+        float_format="%.10g",
+    )
+    ligand_summary.to_csv(
+        output_dir / "denticity_summary.csv",
+        index=False,
+        float_format="%.10g",
+    )
+    block_summary.to_csv(
+        output_dir / "denticity_block_summary.csv",
+        index=False,
+        float_format="%.10g",
+    )
+    block_distribution.to_csv(
+        output_dir
+        / "denticity_block_distribution.csv",
+        index=False,
+        float_format="%.10g",
+    )
+    frame_summary.to_csv(
+        output_dir
+        / "metal_frame_denticity_summary.csv",
+        index=False,
+        float_format="%.10g",
+    )
+
+    checks = {
+        "master_database_has_rows": (
+            metrics["n_master_rows"] > 0
+        ),
+        "peo_chain_contacts_found": (
+            metrics[
+                "n_peo_chain_contact_observations"
+            ] > 0
+        ),
+        "tfsi_contacts_found": (
+            metrics[
+                "n_tfsi_contact_observations"
+            ] > 0
+        ),
+        "peo_json_parsed": (
+            metrics["n_invalid_peo_json_rows"] == 0
+        ),
+        "tfsi_json_parsed": (
+            metrics["n_invalid_tfsi_json_rows"] == 0
+        ),
+        "peo_values_match_master_cn": (
+            metrics[
+                "n_peo_reconstruction_mismatches"
+            ] == 0
+        ),
+        "tfsi_values_match_master_cn": (
+            metrics[
+                "n_tfsi_reconstruction_mismatches"
+            ] == 0
+        ),
+        "peo_denticity_positive": (
+            metrics[
+                "n_nonpositive_peo_denticities"
+            ] == 0
+        ),
+        "tfsi_denticity_positive": (
+            metrics[
+                "n_nonpositive_tfsi_denticities"
+            ] == 0
+        ),
+        "tfsi_denticity_not_above_four": (
+            metrics[
+                "n_tfsi_denticities_above_four"
+            ] == 0
+        ),
+        "tfsi_probability_sums_to_one": (
+            abs(
+                tfsi_distribution[
+                    "probability"
+                ].sum()
+                - 1.0
+            ) < 1.0e-10
+        ),
+        "peo_probability_sums_to_one": (
+            abs(
+                peo_distribution[
+                    "probability"
+                ].sum()
+                - 1.0
+            ) < 1.0e-10
+        ),
+    }
+
+    warnings: List[str] = []
+    errors: List[str] = []
+
+    if metrics["n_invalid_time_rows"] > 0:
+        errors.append(
+            f"{metrics['n_invalid_time_rows']} rows have "
+            "neither a valid time nor a valid frame."
+        )
+
+    failed_checks = [
+        name
+        for name, passed in checks.items()
+        if not passed
+    ]
+
+    if failed_checks:
+        errors.append(
+            "Failed validation checks: "
+            + ", ".join(failed_checks)
+        )
+
+    status = (
+        "FAILED"
+        if errors
+        else "PASSED_WITH_WARNINGS"
+        if warnings
+        else "PASSED"
+    )
+
+    validation = ValidationReport(
+        status=status,
+        checks=checks,
+        metrics={
+            **metrics,
+            "tfsi_probability_sum": float(
+                tfsi_distribution[
+                    "probability"
+                ].sum()
+            ),
+            "peo_probability_sum": float(
+                peo_distribution[
+                    "probability"
+                ].sum()
+            ),
+        },
+        warnings=warnings,
+        errors=errors,
+    )
+
+    write_json(
+        output_dir / "validation_report.json",
+        asdict(validation),
+    )
+
+    runtime = time.perf_counter() - start
+
+    summary_payload = {
+        "module": (
+            "07_denticity_from_master_coordination_database"
+        ),
+        "system": {
+            "system": system,
+            "metal_species": metal,
+            "composition": composition,
+        },
+        "input": {
+            "master_database": str(master_database),
+            "trajectory_read": False,
+            "database_generator": (
+                "01_build_master_coordination_database.py"
+            ),
+        },
+        "configuration": {
+            "chunk_size": args.chunk_size,
+            "block_ns": args.block_ns,
+            "frame_interval_ps": (
+                args.frame_interval_ps
+            ),
+        },
+        "tfsi": json_safe(
+            build_ligand_summary(
+                "TFSI",
+                tfsi_counts,
+                tfsi_block_summary,
+            )
+        ),
+        "peo_chain": json_safe(
+            build_ligand_summary(
+                "PEO_chain",
+                peo_counts,
+                peo_block_summary,
+            )
+        ),
+        "validation_status": status,
+        "scope_note": (
+            "Denticity distributions are conditional on an "
+            "existing metal-ligand contact. TFSI denticity is "
+            "evaluated per metal-TFSI pair. PEO denticity is "
+            "evaluated per metal-PEO-chain pair. Uncoordinated "
+            "ligands are not assigned denticity zero in the "
+            "primary distributions."
+        ),
+        "runtime_seconds": runtime,
+    }
+
+    write_json(
+        output_dir / "summary.json",
+        summary_payload,
+    )
+
+    create_figures(
+        distribution=distribution,
+        block_summary=block_summary,
+        ligand_summary=ligand_summary,
+        frame_summary=frame_summary,
+        figures_dir=output_dir / "figures",
+        system=system,
+        dpi=args.figure_dpi,
+    )
+
+    logger.info("=" * 79)
+    logger.info("MODULE 07 COMPLETED")
+    logger.info("=" * 79)
+
+    for ligand in ("TFSI", "PEO_chain"):
+        row = ligand_summary[
+            ligand_summary["ligand"] == ligand
+        ].iloc[0]
+
+        logger.info(
+            "%-10s observations=%d | mean denticity=%.5f | "
+            "multidentate fraction=%.5f",
+            ligand,
+            int(row["n_contact_observations"]),
+            float(row["mean_denticity"]),
+            float(row["fraction_multidentate"]),
+        )
+
+    logger.info("Validation      : %s", status)
+    logger.info(
+        "Output directory: %s",
+        output_dir,
+    )
+    logger.info(
+        "Runtime         : %.2f min",
+        runtime / 60.0,
+    )
+
+    if status == "FAILED":
+        raise RuntimeError(
+            "Denticity analysis completed, but validation failed. "
+            "Inspect validation_report.json and 07_denticity.log."
+        )
 
 if __name__ == "__main__":
     main()
