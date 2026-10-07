@@ -997,7 +997,8 @@ def summarize_ngp(msd_ngp_table):
                 "time_of_maximum_ngp_ps":
                     maximum_row["lag_time_ps"],
                 "time_of_maximum_ngp_ns":
-                    maximum_row["lag_time_ns"],                "msd_at_maximum_ngp_A2":
+                    maximum_row["lag_time_ns"],
+                "msd_at_maximum_ngp_A2":
                     maximum_row["msd_A2"],
             }
         )
