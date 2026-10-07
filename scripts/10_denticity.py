@@ -997,7 +997,8 @@ def add_identity_columns(
     dataframe: pd.DataFrame,
     identity: Tuple[str, str, str],
 ) -> pd.DataFrame:
-    system, metal, composition = identity    result = dataframe.copy()
+    system, metal, composition = identity
+    result = dataframe.copy()
     result.insert(0, "composition", composition)
     result.insert(0, "metal_species", metal)
     result.insert(0, "system", system)
