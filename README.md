@@ -58,21 +58,21 @@ The cutoffs are intentionally **not species-specific defaults**. Supply values a
 ```text
 electrolyte-md-analysis/
 ├── scripts/                    # complete standalone analysis codes
-│   ├── 01_build_coordination_database.py
-│   ├── 02_structural_summary.py
-│   ├── 03_coordination_dynamics.py
-│   ├── 04_dynamic_heterogeneity.py
-│   ├── 05a_build_pair_database.py
-│   ├── 05b_finalize_pair_database.py
-│   ├── 06_pair_comotion.py
-│   ├── 07_aggregate_dynamics.py
-│   ├── 08_segmental_motion.py
-│   ├── 09_collective_transport.py
-│   ├── 10_denticity.py
-│   ├── 11_ligand_sharing.py
-│   ├── 12_network_topology.py
-│   ├── 13_exchange_translation.py
-│   └── 14_radius_of_gyration.py
+│   ├── build_coordination_database.py
+│   ├── structural_summary.py
+│   ├── coordination_dynamics.py
+│   ├── dynamic_heterogeneity.py
+│   ├── build_pair_database.py
+│   ├── finalize_pair_database.py
+│   ├── pair_comotion.py
+│   ├── aggregate_dynamics.py
+│   ├── segmental_motion.py
+│   ├── collective_transport.py
+│   ├── denticity.py
+│   ├── ligand_sharing.py
+│   ├── network_topology.py
+│   ├── exchange_translation.py
+│   └── radius_of_gyration.py
 ├── src/electrolyte_md/         # small shared utilities used by tests
 ├── configs/example.yaml
 ├── examples/run_full_pipeline.sh
@@ -96,10 +96,10 @@ Main dependencies are **MDAnalysis, NumPy, pandas, and Matplotlib**.
 
 ### 1. Build the master coordination database
 
-Edit the generic `SYSTEMS` block in `scripts/01_build_coordination_database.py` (or adapt it to your paths) and set the metal/polymer and metal/anion cutoffs:
+Edit the generic `SYSTEMS` block in `scripts/build_coordination_database.py` (or adapt it to your paths) and set the metal/polymer and metal/anion cutoffs:
 
 ```bash
-python scripts/01_build_coordination_database.py
+python scripts/build_coordination_database.py
 ```
 
 The database records, for each metal ion and frame, polymer and anion contacts, chain identities, coordination numbers, denticity, P/PT/T/F state, bridging motifs, and cluster membership.
@@ -107,8 +107,8 @@ The database records, for each metal ion and frame, polymer and anion contacts, 
 ### 2. Structural and coordination dynamics
 
 ```bash
-python scripts/02_structural_summary.py
-python scripts/03_coordination_dynamics.py
+python scripts/structural_summary.py
+python scripts/coordination_dynamics.py
 ```
 
 These generate structural populations, block statistics, coordination distributions, residence lifetimes, survival functions, state transitions, and exchange frequencies.
@@ -116,7 +116,7 @@ These generate structural populations, block statistics, coordination distributi
 ### 3. Dynamic heterogeneity
 
 ```bash
-python scripts/04_dynamic_heterogeneity.py
+python scripts/dynamic_heterogeneity.py
 ```
 
 This module calculates metal/anion/cation MSDs, local MSD exponent, non-Gaussian parameter, self van Hove displacement distributions, and coordination-state-conditioned mobility.
@@ -124,13 +124,13 @@ This module calculates metal/anion/cation MSDs, local MSD exponent, non-Gaussian
 ### 4. Build and finalize the metal–anion pair database
 
 ```bash
-python scripts/05a_build_pair_database.py \
+python scripts/build_pair_database.py \
     --topology system.data \
     --trajectory system.lammpsdump \
     --cutoff-A 4.0 \
     --overwrite
 
-python scripts/05b_finalize_pair_database.py --overwrite
+python scripts/finalize_pair_database.py --overwrite
 ```
 
 The first step tracks continuous pair events frame-by-frame. The finalization stage performs censoring-aware lifetime analysis, population convergence, survival probabilities, distance distributions, and pair-event summaries.
@@ -138,11 +138,11 @@ The first step tracks continuous pair events frame-by-frame. The finalization st
 ### 5. Pair co-motion and aggregate dynamics
 
 ```bash
-python scripts/06_pair_comotion.py \
+python scripts/pair_comotion.py \
     --metal-mass-g-mol 40.0 \
     --overwrite
 
-python scripts/07_aggregate_dynamics.py \
+python scripts/aggregate_dynamics.py \
     --metal-mass-g-mol 40.0 \
     --metal-charge-number 1 \
     --overwrite
@@ -153,7 +153,7 @@ Metal mass and formal charge are runtime parameters used for mass-weighted cente
 ### 6. Polymer sliding and local segmental coupling
 
 ```bash
-python scripts/08_segmental_motion.py \
+python scripts/segmental_motion.py \
     --topology system.data \
     --trajectory system.lammpsdump \
     --peo-cutoff 4.0 \
@@ -166,7 +166,7 @@ This module identifies same-chain neighbor sliding, larger EO-site jumps, interc
 ### 7. Collective ionic transport
 
 ```bash
-python scripts/09_collective_transport.py
+python scripts/collective_transport.py
 ```
 
 The module calculates collective Einstein-Helfand displacement correlations, Onsager terms, same-species self/distinct contributions, cross-species correlations, block uncertainties, and fit-window stability diagnostics. Optional Nernst-Einstein comparisons can be enabled by supplying self-diffusion coefficients in the module settings.
@@ -174,9 +174,9 @@ The module calculates collective Einstein-Helfand displacement correlations, Ons
 ### 8. Database-derived structural analyses
 
 ```bash
-python scripts/10_denticity.py --overwrite
-python scripts/11_ligand_sharing.py --overwrite
-python scripts/12_network_topology.py --overwrite
+python scripts/denticity.py --overwrite
+python scripts/ligand_sharing.py --overwrite
+python scripts/network_topology.py --overwrite
 ```
 
 These quantify polymer/anion denticity, ligand sharing among multiple metal ions, aggregate topology, and component-size statistics.
@@ -184,7 +184,7 @@ These quantify polymer/anion denticity, ligand sharing among multiple metal ions
 ### 9. Exchange versus translation
 
 ```bash
-python scripts/13_exchange_translation.py \
+python scripts/exchange_translation.py \
     --topology system.data \
     --trajectory system.lammpsdump \
     --overwrite
@@ -195,7 +195,7 @@ This analysis asks whether translational motion occurs while retaining the coord
 ### 10. Polymer radius of gyration
 
 ```bash
-python scripts/14_radius_of_gyration.py \
+python scripts/radius_of_gyration.py \
     --topology system.data \
     --trajectory system.lammpsdump \
     --polymer-selection "resid 1:40"
