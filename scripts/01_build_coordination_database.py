@@ -1,56 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Sat Jul 11 19:03:37 2026
-
-@author: Ajay R. Dwivedi
-"""
-
-"""
-Master coordination and bridging database for:
-
-    polymer / ionic-liquid / salt electrolyte containing generic metal ions
-
-For every metal ion at every frame, this script stores:
-
-    - Coordinating PEO oxygen atoms
-    - Coordinating PEO chains
-    - Local EO indices on each PEO chain
-    - Coordinating TFSI oxygen atoms
-    - Coordinating TFSI molecules
-    - PEO and TFSI coordination numbers
-    - TFSI denticity
-    - P / PT / T / F coordination states
-    - TFSI-mediated metal bridging
-    - Shared PEO-chain occupancy
-    - Local PEO-mediated bridging
-    - Remote shared-chain occupancy
-    - Metal-TFSI cluster membership
-
-PEO definitions
----------------
-Shared-chain occupancy:
-    Two or more metals coordinate the same PEO chain.
-
-Local PEO bridge:
-    Two metals coordinate the same PEO chain and their nearest coordinating
-    EO sites are separated by no more than LOCAL_PEO_BRIDGE_MAX_EO.
-
-Remote shared-chain occupancy:
-    Two metals coordinate the same PEO chain but their coordinating EO sites
-    are farther apart than LOCAL_PEO_BRIDGE_MAX_EO.
-
-Outputs
--------
-1. master_coordination_<system>.csv.gz
-2. frame_summary_<system>.csv
-3. tfsi_bridging_<system>.csv.gz
-4. peo_chain_bridging_<system>.csv.gz
-5. cluster_summary_<system>.csv.gz
-6. metadata_<system>.json
-
-Author: Ajay Dwivedi
-"""
-
 import csv
 import gzip
 import json
@@ -64,11 +11,6 @@ import MDAnalysis as mda
 import numpy as np
 from MDAnalysis.lib.distances import capped_distance
 
-
-# ============================================================
-# USER SETTINGS
-# ============================================================
-
 SYSTEMS = {
     "example_system": {
         "topology": "system.data",
@@ -78,45 +20,27 @@ SYSTEMS = {
         "metal_selection": "type 17",
         "peo_oxygen_selection": "resid 1:40 and type 4",
         "tfsi_oxygen_selection": "type 9",
-        # Set these from the first minimum of the corresponding RDFs.
+
         "peo_cutoff_A": 4.0,
         "tfsi_cutoff_A": 4.0,
     },
 }
 
-
-# Physical time between saved trajectory frames.
 FRAME_INTERVAL_PS = 10.0
 
-# Trajectory frame range.
 START_FRAME = 0
 STOP_FRAME = None
 STRIDE = 1
 
-# Maximum EO-index separation for local PEO-mediated bridging.
-#
-# Example:
-# Metal A coordinates EO indices 5 and 6.
-# Metal B coordinates EO indices 8 and 9.
-# Minimum separation = 2.
-# This pair is a local bridge when the threshold is 4.
 LOCAL_PEO_BRIDGE_MAX_EO = 4
 
-# Number of processed frames accumulated before writing.
 WRITE_EVERY_N_FRAMES = 100
 
 OUTPUT_ROOT = Path("coordination_database")
 
-# Prefer LAMMPS atom IDs in output.
 STORE_ATOM_IDS = True
 
-
-# ============================================================
-# UNION-FIND FOR METAL-TFSI CLUSTERS
-# ============================================================
-
 class UnionFind:
-    """Disjoint-set data structure for connected components."""
 
     def __init__(self):
         self.parent = {}
@@ -152,18 +76,12 @@ class UnionFind:
             self.parent[root_b] = root_a
             self.rank[root_a] += 1
 
-
-# ============================================================
-# HELPER FUNCTIONS
-# ============================================================
-
 def encode_integer_list(values: Iterable[int]) -> str:
-    """Encode integer values as a semicolon-separated string."""
+
     return ";".join(str(int(value)) for value in sorted(set(values)))
 
-
 def encode_dictionary(values: Dict[int, int]) -> str:
-    """Encode an integer dictionary as compact JSON."""
+
     clean = {
         str(int(key)): int(value)
         for key, value in sorted(values.items())
@@ -171,9 +89,8 @@ def encode_dictionary(values: Dict[int, int]) -> str:
 
     return json.dumps(clean, separators=(",", ":"))
 
-
 def atom_output_id(atom) -> int:
-    """Return LAMMPS atom ID when available; otherwise atom index."""
+
     if STORE_ATOM_IDS:
         try:
             return int(atom.id)
@@ -182,12 +99,10 @@ def atom_output_id(atom) -> int:
 
     return int(atom.index)
 
-
 def determine_coordination_state(
     n_peo_oxygen: int,
     n_tfsi_molecules: int,
 ) -> str:
-    """Assign P, PT, T, or F state."""
 
     if n_peo_oxygen > 0 and n_tfsi_molecules == 0:
         return "P"
@@ -200,13 +115,7 @@ def determine_coordination_state(
 
     return "F"
 
-
 def build_peo_local_index_lookup(peo_oxygens):
-    """
-    Map each PEO oxygen atom index to its local EO number.
-
-    EO numbering begins at 1 independently for each PEO chain.
-    """
 
     lookup = {}
 
@@ -232,16 +141,10 @@ def build_peo_local_index_lookup(peo_oxygens):
 
     return lookup
 
-
 def minimum_eo_separation(
     eo_indices_a: Set[int],
     eo_indices_b: Set[int],
 ):
-    """
-    Return minimum absolute EO-index separation between two metals.
-
-    Both metals must coordinate the same PEO chain.
-    """
 
     if not eo_indices_a or not eo_indices_b:
         return None
@@ -252,7 +155,6 @@ def minimum_eo_separation(
         for eo_b in eo_indices_b
     )
 
-
 def write_csv_rows(
     output_file: Path,
     rows: List[dict],
@@ -260,7 +162,6 @@ def write_csv_rows(
     write_header: bool,
     compressed: bool,
 ):
-    """Append rows to CSV or CSV.GZ."""
 
     if not rows:
         return
@@ -309,11 +210,6 @@ def write_csv_rows(
 
             writer.writerows(rows)
 
-
-# ============================================================
-# OUTPUT COLUMNS
-# ============================================================
-
 MASTER_COLUMNS = [
     "system",
     "metal_species",
@@ -341,12 +237,10 @@ MASTER_COLUMNS = [
     "total_oxygen_cn",
     "coordination_state",
 
-    # TFSI bridging
     "is_tfsi_bridged",
     "n_bridging_tfsi",
     "bridging_tfsi_resids",
 
-    # PEO shared-chain and bridging
     "is_shared_peo_chain",
     "n_shared_peo_chains",
     "shared_peo_chain_resids",
@@ -359,14 +253,12 @@ MASTER_COLUMNS = [
     "n_remote_peo_shared_chains",
     "remote_peo_shared_chain_resids",
 
-    # Metal-TFSI cluster
     "cluster_id",
     "cluster_n_metals",
     "cluster_n_tfsi",
     "cluster_total_nodes",
     "is_multi_metal_cluster",
 ]
-
 
 FRAME_COLUMNS = [
     "system",
@@ -376,7 +268,6 @@ FRAME_COLUMNS = [
     "time_ps",
     "n_metals",
 
-    # State populations
     "n_P",
     "n_PT",
     "n_T",
@@ -387,21 +278,18 @@ FRAME_COLUMNS = [
     "frac_T",
     "frac_F",
 
-    # Coordination
     "mean_peo_oxygen_cn",
     "mean_peo_chain_cn",
     "mean_tfsi_oxygen_cn",
     "mean_tfsi_molecular_cn",
     "mean_total_oxygen_cn",
 
-    # TFSI bridging
     "n_coordinated_tfsi",
     "n_bridging_tfsi",
     "fraction_coordinated_tfsi_bridging",
     "fraction_all_tfsi_bridging",
     "fraction_metals_tfsi_bridged",
 
-    # PEO chain sharing and bridging
     "n_peo_chains_coordinating_metals",
     "n_peo_chains_shared_by_metals",
     "n_peo_chains_local_bridging",
@@ -420,13 +308,11 @@ FRAME_COLUMNS = [
     "mean_metals_per_coordinating_peo_chain",
     "max_metals_on_one_peo_chain",
 
-    # Combined bridge populations
     "fraction_metals_any_bridge",
     "fraction_metals_both_peo_tfsi_bridged",
     "fraction_metals_peo_only_bridged",
     "fraction_metals_tfsi_only_bridged",
 
-    # Metal-TFSI clusters
     "n_metal_containing_clusters",
     "mean_cluster_metals_number_average",
     "mean_cluster_metals_weight_average",
@@ -435,7 +321,6 @@ FRAME_COLUMNS = [
     "fraction_metals_in_multi_metal_clusters",
     "fraction_single_metal_clusters",
 ]
-
 
 TFSI_BRIDGING_COLUMNS = [
     "system",
@@ -449,7 +334,6 @@ TFSI_BRIDGING_COLUMNS = [
     "metal_atom_ids",
     "is_bridging",
 ]
-
 
 PEO_BRIDGING_COLUMNS = [
     "system",
@@ -475,7 +359,6 @@ PEO_BRIDGING_COLUMNS = [
     "pair_eo_separations",
 ]
 
-
 CLUSTER_COLUMNS = [
     "system",
     "metal_species",
@@ -495,13 +378,7 @@ CLUSTER_COLUMNS = [
     "is_multi_metal_cluster",
 ]
 
-
-# ============================================================
-# CORE ANALYSIS
-# ============================================================
-
 def analyze_system(system_name: str, config: dict):
-    """Build complete coordination database for one system."""
 
     start_clock = time.time()
 
@@ -541,7 +418,6 @@ def analyze_system(system_name: str, config: dict):
         / f"metadata_{system_name}.json"
     )
 
-    # Prevent accidental appending to old results.
     for path in [
         master_file,
         frame_file,
@@ -664,10 +540,6 @@ def analyze_system(system_name: str, config: dict):
         time_ps = frame * FRAME_INTERVAL_PS
         box = ts.dimensions
 
-        # ====================================================
-        # 1. METAL-PEO CONTACTS
-        # ====================================================
-
         peo_pairs = capped_distance(
             metals.positions,
             peo_oxygens.positions,
@@ -680,14 +552,10 @@ def analyze_system(system_name: str, config: dict):
         metal_to_peo_chain_resids = defaultdict(set)
         metal_to_peo_local_indices = defaultdict(set)
 
-        # Nested mapping:
-        # metal -> PEO chain -> local EO indices
         metal_chain_to_eo_indices = defaultdict(
             lambda: defaultdict(set)
         )
 
-        # Reverse map:
-        # PEO chain -> metals
         peo_chain_to_metals = defaultdict(set)
 
         for metal_local_index, peo_group_index in peo_pairs:
@@ -727,10 +595,6 @@ def analyze_system(system_name: str, config: dict):
                 chain_resid
             ].add(metal_local_index)
 
-        # ====================================================
-        # 2. PEO SHARED-CHAIN AND LOCAL-BRIDGE ANALYSIS
-        # ====================================================
-
         shared_peo_chain_resids = set()
         local_bridging_peo_chain_resids = set()
         remote_shared_peo_chain_resids = set()
@@ -739,7 +603,6 @@ def analyze_system(system_name: str, config: dict):
         metals_in_local_peo_bridges = set()
         metals_in_remote_peo_shared_chains = set()
 
-        # Per-metal record of which chains have which motif.
         metal_to_shared_peo_chains = defaultdict(set)
         metal_to_local_peo_bridge_chains = defaultdict(set)
         metal_to_remote_peo_shared_chains = defaultdict(set)
@@ -913,10 +776,6 @@ def analyze_system(system_name: str, config: dict):
                     ),
             })
 
-        # ====================================================
-        # 3. METAL-TFSI CONTACTS AND DENTICITY
-        # ====================================================
-
         tfsi_pairs = capped_distance(
             metals.positions,
             tfsi_oxygens.positions,
@@ -963,10 +822,6 @@ def analyze_system(system_name: str, config: dict):
                 tfsi_resid
             ].add(metal_local_index)
 
-        # ====================================================
-        # 4. TFSI-MEDIATED BRIDGING
-        # ====================================================
-
         bridging_tfsi_resids = {
             tfsi_resid
             for tfsi_resid, metal_set
@@ -997,7 +852,8 @@ def analyze_system(system_name: str, config: dict):
                 "metal_species": config["metal"],
                 "composition": config["composition"],
                 "frame": frame,
-                "time_ps": time_ps,                "tfsi_resid": tfsi_resid,
+                "time_ps": time_ps,
+                "tfsi_resid": tfsi_resid,
 
                 "n_coordinating_metals":
                     len(metal_set),
@@ -1016,19 +872,13 @@ def analyze_system(system_name: str, config: dict):
                     int(is_bridging),
             })
 
-        # ====================================================
-        # 5. METAL-TFSI CLUSTER ANALYSIS
-        # ====================================================
-
         union_find = UnionFind()
 
-        # Include every metal, even without a TFSI contact.
         for metal_local_index in range(len(metals)):
             union_find.add(
                 f"M:{metal_local_index}"
             )
 
-        # Only coordinated TFSI molecules enter the graph.
         for tfsi_resid in tfsi_to_metals:
             union_find.add(
                 f"T:{tfsi_resid}"
@@ -1148,7 +998,6 @@ def analyze_system(system_name: str, config: dict):
                 "is_multi_metal_cluster":
                     int(n_metals_cluster >= 2),
             })
-
             for metal_local_index in metal_members:
 
                 metal_cluster_lookup[
@@ -1159,10 +1008,6 @@ def analyze_system(system_name: str, config: dict):
                     "n_tfsi": n_tfsi_cluster,
                     "total_nodes": total_nodes,
                 }
-
-        # ====================================================
-        # 6. PER-METAL MASTER DATABASE
-        # ====================================================
 
         state_counter = Counter()
 
@@ -1266,14 +1111,12 @@ def analyze_system(system_name: str, config: dict):
 
             state_counter[state] += 1
 
-            # TFSI bridges for this metal.
             metal_bridging_tfsi = (
                 tfsi_resids.intersection(
                     bridging_tfsi_resids
                 )
             )
 
-            # PEO shared/local/remote chains.
             shared_chains = (
                 metal_to_shared_peo_chains[
                     metal_local_index
@@ -1317,7 +1160,6 @@ def analyze_system(system_name: str, config: dict):
                 for index in tfsi_atom_indices
             ]
 
-            # Store EO indices separately for each chain.
             peo_chain_eo_mapping = {
                 int(chain_resid): sorted(
                     int(value)
@@ -1488,10 +1330,6 @@ def analyze_system(system_name: str, config: dict):
             frame_total_cn.append(
                 total_oxygen_cn
             )
-
-        # ====================================================
-        # 7. FRAME-LEVEL SUMMARY
-        # ====================================================
 
         n_metals = len(metals)
 
@@ -1756,10 +1594,6 @@ def analyze_system(system_name: str, config: dict):
 
         processed_frames += 1
 
-        # ====================================================
-        # 8. PERIODIC DISK WRITE
-        # ====================================================
-
         if (
             processed_frames
             % WRITE_EVERY_N_FRAMES
@@ -1825,10 +1659,6 @@ def analyze_system(system_name: str, config: dict):
                 f"| trajectory frame {frame:6d} "
                 f"| elapsed {elapsed_minutes:8.2f} min"
             )
-
-    # ========================================================
-    # 9. WRITE REMAINING ROWS
-    # ========================================================
 
     write_csv_rows(
         master_file,
@@ -1953,11 +1783,6 @@ def analyze_system(system_name: str, config: dict):
         f"{output_dir.resolve()}"
     )
 
-
-# ============================================================
-# MAIN DRIVER
-# ============================================================
-
 def main():
 
     OUTPUT_ROOT.mkdir(
@@ -1982,10 +1807,5 @@ def main():
     print("ALL SYSTEMS COMPLETED")
     print("=" * 78)
 
-
 if __name__ == "__main__":
     main()
-    
-    
-    
-    
