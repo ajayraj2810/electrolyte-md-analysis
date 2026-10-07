@@ -997,7 +997,8 @@ def build_tfsi_bridge_events(
                         right_censored
                     ),
                     "censored": int(
-                        left_censored                        or right_censored
+                        left_censored
+                        or right_censored
                     ),
                     "start_block": frame_to_block[
                         start_frame
