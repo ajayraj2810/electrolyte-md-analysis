@@ -1,4 +1,3 @@
-"""Periodic-boundary-condition utilities."""
 import numpy as np
 
 def minimum_image(displacement, box_lengths):

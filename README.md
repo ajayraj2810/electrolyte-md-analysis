@@ -2,9 +2,11 @@
 
 A modular Python/MDAnalysis workflow for extracting **coordination, ion-association, polymer-dynamics, and collective-transport mechanisms** from molecular-dynamics simulations of polymer electrolytes containing metal ions.
 
-This repository packages the analysis workflow developed for long-timescale LAMMPS trajectories into a reusable, metal-agnostic code base. Metal identity is **not hard-coded**: selections, coordination cutoffs, charge number, and molar mass are user-defined inputs.
+This repository provides the analysis workflow developed for long-timescale LAMMPS trajectories as a set of complete, standalone, metal-agnostic Python scripts. Metal identity is **not hard-coded**: selections, coordination cutoffs, charge number, and molar mass are user-defined inputs.
 
 > The public repository contains analysis code and documentation only. Large trajectories, production databases, and system-specific research data are intentionally excluded.
+
+The numbered files in `scripts/` contain the full standalone implementations. Source comments are intentionally minimal; detailed scientific definitions and methodology are kept in `docs/` so the analysis code remains easy to scan.
 
 ## What this workflow analyzes
 
@@ -55,27 +57,24 @@ The cutoffs are intentionally **not species-specific defaults**. Supply values a
 
 ```text
 electrolyte-md-analysis/
-├── src/electrolyte_md/
-│   ├── pbc.py
-│   ├── states.py
-│   └── modules/
-│       ├── coordination_database.py
-│       ├── structural_summary.py
-│       ├── coordination_dynamics.py
-│       ├── dynamic_heterogeneity.py
-│       ├── pair_database.py
-│       ├── pair_database_finalize.py
-│       ├── pair_comotion.py
-│       ├── aggregate_dynamics.py
-│       ├── segmental_motion.py
-│       ├── collective_transport.py
-│       ├── denticity.py
-│       ├── ligand_sharing.py
-│       ├── network_topology.py
-│       ├── exchange_translation.py
-│       └── radius_of_gyration.py
-├── scripts/                    # numbered command-line entry points
-├── configs/example.yaml        # shared system-parameter template
+├── scripts/                    # complete standalone analysis codes
+│   ├── 01_build_coordination_database.py
+│   ├── 02_structural_summary.py
+│   ├── 03_coordination_dynamics.py
+│   ├── 04_dynamic_heterogeneity.py
+│   ├── 05a_build_pair_database.py
+│   ├── 05b_finalize_pair_database.py
+│   ├── 06_pair_comotion.py
+│   ├── 07_aggregate_dynamics.py
+│   ├── 08_segmental_motion.py
+│   ├── 09_collective_transport.py
+│   ├── 10_denticity.py
+│   ├── 11_ligand_sharing.py
+│   ├── 12_network_topology.py
+│   ├── 13_exchange_translation.py
+│   └── 14_radius_of_gyration.py
+├── src/electrolyte_md/         # small shared utilities used by tests
+├── configs/example.yaml
 ├── examples/run_full_pipeline.sh
 ├── docs/
 ├── tests/
@@ -86,7 +85,7 @@ electrolyte-md-analysis/
 ## Installation
 
 ```bash
-git clone https://github.com/USERNAME/electrolyte-md-analysis.git
+git clone https://github.com/ajayraj2810/electrolyte-md-analysis.git
 cd electrolyte-md-analysis
 python -m pip install -e .
 ```
@@ -97,7 +96,7 @@ Main dependencies are **MDAnalysis, NumPy, pandas, and Matplotlib**.
 
 ### 1. Build the master coordination database
 
-Edit the generic `SYSTEMS` block in `coordination_database.py` (or adapt it to your paths) and set the metal/polymer and metal/anion cutoffs:
+Edit the generic `SYSTEMS` block in `scripts/01_build_coordination_database.py` (or adapt it to your paths) and set the metal/polymer and metal/anion cutoffs:
 
 ```bash
 python scripts/01_build_coordination_database.py
@@ -145,10 +144,11 @@ python scripts/06_pair_comotion.py \
 
 python scripts/07_aggregate_dynamics.py \
     --metal-mass-g-mol 40.0 \
+    --metal-charge-number 1 \
     --overwrite
 ```
 
-The metal mass is a runtime parameter used only for mass-weighted center-of-mass quantities; it does not select or identify a species.
+Metal mass and formal charge are runtime parameters used for mass-weighted center-of-mass and aggregate-charge quantities; neither identifies a species.
 
 ### 6. Polymer sliding and local segmental coupling
 
@@ -224,7 +224,7 @@ The values in `configs/example.yaml` are placeholders, not universal physical co
 
 ## Scientific principles preserved from the validated workflow
 
-The portfolio refactor changes organization and interfaces, not the core analysis definitions. The consolidated modules retain the tested treatment of:
+The portfolio refactor changes organization and interfaces, not the core analysis definitions. The standalone scripts retain the tested treatment of:
 
 - periodic minimum-image displacements and trajectory unwrapping;
 - continuous and intermittent contact lifetimes;
