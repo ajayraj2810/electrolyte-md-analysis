@@ -1,37 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Module 4: Dynamic Heterogeneity and State-Resolved Transport
-
-Calculates:
-
-1. MSD for metal, TFSI, and EMIM representative atoms
-2. Local MSD exponent beta(t)
-3. Non-Gaussian parameter alpha2(t)
-4. Self Van Hove displacement distributions
-5. Initial-state-conditioned metal MSD
-6. Persistent-state metal MSD
-7. Initially isolated versus clustered metal MSD
-8. Persistently isolated versus clustered metal MSD
-
-Run from inside one system folder.
-
-Expected Module 1 input:
-    master_coordination_*.csv.gz
-
-Expected trajectory inputs:
-    one LAMMPS data file
-    one LAMMPS dump trajectory
-
-Important:
-    Coordinates are unwrapped by accumulating minimum-image
-    displacements between consecutive trajectory frames.
-
-Assumption:
-    The simulation box is orthorhombic.
-
-Author: Ajay Dwivedi
-"""
-
 from pathlib import Path
 import json
 import math
@@ -40,46 +6,24 @@ import MDAnalysis as mda
 import numpy as np
 import pandas as pd
 
-
-# ============================================================
-# USER SETTINGS
-# ============================================================
-
 WORK_DIR = Path.cwd()
 OUTPUT_DIR = WORK_DIR / "dynamic_heterogeneity"
 
-# Set explicit filenames when automatic discovery is ambiguous.
-# Examples:
-#
-# TOPOLOGY_FILE = Path("system.data")
-# TRAJECTORY_FILE = Path("system.lammpsdump")
-#
-# Leave as None for automatic recursive discovery.
 TOPOLOGY_FILE = None
 TRAJECTORY_FILE = None
 
-# Atom selections.
 METAL_SELECTION = "type 17"
 
-# One representative atom per TFSI molecule.
-# User mapping: TFSI representative/COM atom type = 7.
 TFSI_REPRESENTATIVE_SELECTION = "type 7"
 
-# One representative atom per EMIM molecule.
-# User mapping: EMIM representative/COM atom type = 18.
 EMIM_REPRESENTATIVE_SELECTION = "type 18"
 
-# Maximum lag time used for MSD and NGP.
 MAX_LAG_NS = 20.0
 
-# Number of logarithmically distributed lag times.
 N_LOG_LAGS = 70
 
-# Include every short lag up to this number of saved frames.
 N_EARLY_LINEAR_LAGS = 20
 
-# Requested Van Hove lag times.
-# The closest available trajectory lag will be used.
 VAN_HOVE_LAG_TIMES_NS = [
     0.1,
     0.5,
@@ -89,36 +33,22 @@ VAN_HOVE_LAG_TIMES_NS = [
     10.0,
 ]
 
-# Van Hove histogram settings.
 VAN_HOVE_BIN_WIDTH_A = 0.10
 VAN_HOVE_MAX_DISPLACEMENT_A = 30.0
 
-# To reduce cost, use every Nth time origin for Van Hove.
 VAN_HOVE_ORIGIN_STRIDE = 10
 
-# Time-origin stride for MSD and NGP.
-# Use 1 for maximum statistics.
 MSD_ORIGIN_STRIDE = 1
 
-# State categories.
 STATE_ORDER = ["P", "PT", "T", "F"]
 
-# Minimum number of displacement samples needed to report a value.
 MIN_CONDITIONAL_SAMPLES = 100
 
-# Save the unwrapped coordinates as compressed NumPy files.
 SAVE_UNWRAPPED_COORDINATES = False
 
-# Float32 greatly reduces memory and is sufficient for this analysis.
 COORDINATE_DTYPE = np.float32
 
-
-# ============================================================
-# FILE DISCOVERY
-# ============================================================
-
 def find_single_file(pattern, excluded_directory=None):
-    """Find exactly one file recursively below WORK_DIR."""
 
     matches = sorted(WORK_DIR.rglob(pattern))
 
@@ -147,9 +77,7 @@ def find_single_file(pattern, excluded_directory=None):
 
     return matches[0]
 
-
 def discover_input_files():
-    """Locate topology, trajectory, and master database."""
 
     master_file = find_single_file(
         "master_coordination_*.csv.gz",
@@ -220,13 +148,7 @@ def discover_input_files():
         master_file,
     )
 
-
-# ============================================================
-# MASTER DATABASE
-# ============================================================
-
 def read_master_database(master_file):
-    """Read fields needed for state and cluster conditioning."""
 
     required_columns = [
         "system",
@@ -301,11 +223,7 @@ def read_master_database(master_file):
 
     return master
 
-
 def create_state_and_cluster_matrices(master):
-    """
-    Convert the master table into frame x metal matrices.
-    """
 
     frames = np.sort(
         master["frame"].unique()
@@ -415,13 +333,7 @@ def create_state_and_cluster_matrices(master):
         clusters,
     )
 
-
-# ============================================================
-# TRAJECTORY COORDINATES
-# ============================================================
-
 def validate_orthorhombic_box(dimensions):
-    """Confirm 90-degree box angles."""
 
     angles = np.asarray(
         dimensions[3:6],
@@ -437,9 +349,7 @@ def validate_orthorhombic_box(dimensions):
             "This script currently supports orthorhombic boxes only."
         )
 
-
 def minimum_image_displacement(delta, box_lengths):
-    """Apply orthorhombic minimum-image convention."""
 
     return (
         delta
@@ -449,19 +359,12 @@ def minimum_image_displacement(delta, box_lengths):
         )
     )
 
-
 def extract_unwrapped_positions(
     universe,
     atom_group,
     trajectory_frames,
     label,
 ):
-    """
-    Extract and unwrap selected atom coordinates.
-
-    The unwrapped trajectory is constructed from consecutive
-    minimum-image displacements.
-    """
 
     n_frames = len(trajectory_frames)
     n_atoms = len(atom_group)
@@ -550,16 +453,10 @@ def extract_unwrapped_positions(
 
     return coordinates
 
-
-# ============================================================
-# LAG-TIME SETUP
-# ============================================================
-
 def create_lag_frames(
     number_of_frames,
     frame_interval_ps,
 ):
-    """Create mixed linear and logarithmic lag values."""
 
     maximum_lag_frames = int(
         min(
@@ -621,22 +518,11 @@ def create_lag_frames(
 
     return lag_frames
 
-
-# ============================================================
-# MSD AND NGP
-# ============================================================
-
 def displacement_squared_for_lag(
     positions,
     lag,
     origin_stride,
 ):
-    """
-    Return squared displacement for all origins and particles.
-
-    Shape:
-        number_of_origins x number_of_particles
-    """
 
     starts = np.arange(
         0,
@@ -657,14 +543,12 @@ def displacement_squared_for_lag(
 
     return starts, squared
 
-
 def calculate_msd_ngp(
     positions,
     lag_frames,
     frame_interval_ps,
     species_name,
 ):
-    """Calculate conventional MSD, fourth moment, NGP, and beta."""
 
     rows = []
 
@@ -764,17 +648,11 @@ def calculate_msd_ngp(
 
     return result
 
-
-# ============================================================
-# SELF VAN HOVE
-# ============================================================
-
 def nearest_available_lag(
     requested_ns,
     frame_interval_ps,
     number_of_frames,
 ):
-    """Convert requested lag time to a valid frame lag."""
 
     lag = int(
         round(
@@ -792,19 +670,12 @@ def nearest_available_lag(
         ),
     )
 
-
 def calculate_van_hove_distributions(
     positions,
     requested_lag_times_ns,
     frame_interval_ps,
     species_name,
 ):
-    """
-    Calculate radial displacement probability densities.
-
-    The saved quantity is P(r), normalized so that:
-        integral P(r) dr = 1
-    """
 
     edges = np.arange(
         0.0,
@@ -885,23 +756,11 @@ def calculate_van_hove_distributions(
 
     return pd.DataFrame(rows)
 
-
-# ============================================================
-# CONDITIONAL METAL MSD
-# ============================================================
-
 def persistent_boolean_mask(
     condition_matrix,
     starts,
     lag,
 ):
-    """
-    Return origin x metal mask for particles satisfying the
-    condition throughout the complete interval.
-
-    This function processes one origin at a time to avoid a very
-    large temporary array.
-    """
 
     mask = np.zeros(
         (
@@ -924,7 +783,6 @@ def persistent_boolean_mask(
 
     return mask
 
-
 def append_conditioned_result(
     rows,
     squared_displacements,
@@ -935,7 +793,6 @@ def append_conditioned_result(
     category_value,
     persistence_definition,
 ):
-    """Summarize a conditioned displacement population."""
 
     selected = squared_displacements[
         mask
@@ -978,7 +835,6 @@ def append_conditioned_result(
         }
     )
 
-
 def calculate_state_conditioned_msd(
     metal_positions,
     states,
@@ -986,9 +842,6 @@ def calculate_state_conditioned_msd(
     lag_frames,
     frame_interval_ps,
 ):
-    """
-    Calculate initial-state and persistent-state/cluster MSDs.
-    """
 
     rows = []
 
@@ -997,11 +850,8 @@ def calculate_state_conditioned_msd(
         starts, squared = displacement_squared_for_lag(
             metal_positions,
             lag,
-            MSD_ORIGIN_STRIDE,        )
-
-        # ----------------------------------------------------
-        # Initial-state-conditioned MSD
-        # ----------------------------------------------------
+            MSD_ORIGIN_STRIDE,
+        )
 
         initial_states = states[
             starts
@@ -1049,10 +899,6 @@ def calculate_state_conditioned_msd(
             category_value="clustered",
             persistence_definition="initial_status",
         )
-
-        # ----------------------------------------------------
-        # Persistent-state-conditioned MSD
-        # ----------------------------------------------------
 
         for state in STATE_ORDER:
 
@@ -1118,13 +964,7 @@ def calculate_state_conditioned_msd(
 
     return pd.DataFrame(rows)
 
-
-# ============================================================
-# SUMMARY TABLES
-# ============================================================
-
 def summarize_ngp(msd_ngp_table):
-    """Extract maximum NGP for each species."""
 
     rows = []
 
@@ -1157,18 +997,12 @@ def summarize_ngp(msd_ngp_table):
                 "time_of_maximum_ngp_ps":
                     maximum_row["lag_time_ps"],
                 "time_of_maximum_ngp_ns":
-                    maximum_row["lag_time_ns"],
-                "msd_at_maximum_ngp_A2":
+                    maximum_row["lag_time_ns"],                "msd_at_maximum_ngp_A2":
                     maximum_row["msd_A2"],
             }
         )
 
     return pd.DataFrame(rows)
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
 
@@ -1271,8 +1105,6 @@ def main():
             f"Database metals: {len(metal_indices)}"
         )
 
-    # The current master database metal_local_index must match
-    # the order of the metal atom selection from Module 1.
     trajectory_frames = database_frames.astype(int)
 
     metal_positions = extract_unwrapped_positions(
@@ -1343,10 +1175,6 @@ def main():
         OUTPUT_DIR / "lag_times.csv",
         index=False,
     )
-
-    # --------------------------------------------------------
-    # Conventional MSD and NGP
-    # --------------------------------------------------------
 
     species_tables = []
 
@@ -1426,10 +1254,6 @@ def main():
         index=False,
     )
 
-    # --------------------------------------------------------
-    # Self Van Hove displacement distributions
-    # --------------------------------------------------------
-
     van_hove_tables = []
 
     for species_name, positions in [
@@ -1483,10 +1307,6 @@ def main():
         / "self_van_hove_distributions.csv",
         index=False,
     )
-
-    # --------------------------------------------------------
-    # State- and cluster-conditioned metal MSD
-    # --------------------------------------------------------
 
     print(
         "\nCalculating state- and cluster-conditioned metal MSD"
@@ -1583,10 +1403,5 @@ def main():
     print("\nResults saved in:")
     print(OUTPUT_DIR)
 
-
 if __name__ == "__main__":
     main()
-
-
-
-
