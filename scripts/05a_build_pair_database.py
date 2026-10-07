@@ -1,48 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-05E1_build_pair_database.py
-===========================
-
-Module 5E1 — Metal–TFSI Pair Database Builder
-Parts 1 + 2: initialization, validation, periodic neighbor search, persistent
-pair tracking, compressed database writing, and frame-level summaries.
-
-Pair definition
----------------
-A metal–TFSI pair exists in a frame when at least one TFSI oxygen is within
-the metal-specific metal–oxygen cutoff.
-
-Project cutoffs
----------------
-Specify the metal–oxygen cutoff explicitly with --cutoff-A.
-
-Expected LAMMPS atom types
---------------------------
-Metal ion       : type 17
-TFSI reference  : type 7  (one reference/COM atom per TFSI residue)
-TFSI oxygen     : type 9
-
-Main outputs
-------------
-05E1_pair_database/
-├── pair_database.csv.gz
-├── frame_pair_summary.csv
-├── validation_report.json
-├── metadata.json
-├── 05E1_pair_database.log
-└── figures/                       # populated in Part 3
-
-Notes
------
-1. Coordinates stored in pair_database.csv.gz are wrapped coordinates.
-2. Box lengths and angles are stored for every row so Part 5E2 can reconstruct
-   continuous displacements from minimum-image frame-to-frame increments.
-3. Pair age is consecutive age. If a pair disappears and later reforms, a new
-   pair event starts and pair_age_frames resets to 1.
-
-Author: Ajay Dwivedi
-"""
 
 from __future__ import annotations
 
@@ -72,11 +28,6 @@ except ImportError as exc:
         "    python -m pip install MDAnalysis"
     ) from exc
 
-
-# =============================================================================
-# USER-EDITABLE DEFAULTS
-# =============================================================================
-
 DEFAULT_TOPOLOGY = "system.data"
 DEFAULT_TRAJECTORY = "system.lammpsdump"
 DEFAULT_OUTPUT_DIR = "05E1_pair_database"
@@ -90,16 +41,9 @@ METAL_ATOM_TYPE = 17
 TFSI_REFERENCE_ATOM_TYPE = 7
 TFSI_OXYGEN_ATOM_TYPE = 9
 
-# Coordination cutoff is supplied at runtime; determine it from structural analysis.
-
 LOG_EVERY_N_FRAMES = 100
 FLUSH_EVERY_N_FRAMES = 100
 CSV_FLOAT_FORMAT = ".8g"
-
-
-# =============================================================================
-# OUTPUT COLUMN DEFINITIONS
-# =============================================================================
 
 PAIR_COLUMNS = [
     "system",
@@ -167,11 +111,6 @@ FRAME_SUMMARY_COLUMNS = [
     "box_volume_A3",
 ]
 
-
-# =============================================================================
-# DATA CLASSES
-# =============================================================================
-
 @dataclass(frozen=True)
 class SystemIdentity:
     system: str
@@ -180,7 +119,6 @@ class SystemIdentity:
     temperature_K: float
     topology: str
     trajectory: str
-
 
 @dataclass(frozen=True)
 class AnalysisConfig:
@@ -223,7 +161,6 @@ class AnalysisConfig:
         if self.flush_every_n_frames <= 0:
             raise ValueError("flush_every_n_frames must be positive.")
 
-
 @dataclass
 class ValidationReport:
     status: str = "NOT_RUN"
@@ -258,7 +195,6 @@ class ValidationReport:
         self.finalize()
         return make_json_safe(asdict(self))
 
-
 @dataclass
 class PairState:
     pair_instance_id: str
@@ -267,14 +203,7 @@ class PairState:
     start_frame: int
     start_time_ps: float
 
-
 class PairTracker:
-    """
-    Tracks consecutive metal–TFSI pair events.
-
-    A pair that disappears for one processed frame and later reforms receives
-    a new pair_instance_id and its age resets.
-    """
 
     def __init__(self) -> None:
         self.active: Dict[str, PairState] = {}
@@ -330,9 +259,7 @@ class PairTracker:
         self.active.clear()
         return remaining
 
-
 class PairDatabaseWriter:
-    """Streaming gzip CSV writer to avoid retaining millions of rows in RAM."""
 
     def __init__(self, path: Path, fieldnames: Sequence[str]) -> None:
         self.path = path
@@ -372,7 +299,6 @@ class PairDatabaseWriter:
         if self.handle is not None:
             self.handle.close()
 
-
 class OutputManager:
     def __init__(self, root: Path, overwrite: bool = False) -> None:
         self.root = root.resolve()
@@ -404,11 +330,6 @@ class OutputManager:
         self.root.mkdir(parents=True, exist_ok=True)
         self.figures.mkdir(parents=True, exist_ok=True)
 
-
-# =============================================================================
-# LOGGING AND SERIALIZATION
-# =============================================================================
-
 def configure_logging(log_file: Path) -> logging.Logger:
     logger = logging.getLogger("05E1_pair_database")
     logger.setLevel(logging.INFO)
@@ -430,7 +351,6 @@ def configure_logging(log_file: Path) -> logging.Logger:
 
     return logger
 
-
 def make_json_safe(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
@@ -448,7 +368,6 @@ def make_json_safe(value: Any) -> Any:
         return [make_json_safe(v) for v in value]
     return value
 
-
 def write_json(path: Path, payload: Mapping[str, Any]) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as handle:
@@ -456,21 +375,14 @@ def write_json(path: Path, payload: Mapping[str, Any]) -> None:
         handle.write("\n")
     tmp_path.replace(path)
 
-
 def format_float(value: float) -> str:
     if value is None or not np.isfinite(value):
         return ""
     return format(float(value), CSV_FLOAT_FORMAT)
 
-
-# =============================================================================
-# SYSTEM DETECTION
-# =============================================================================
-
 def detect_metal_species(*texts: str) -> str:
-    """Return the generic metadata label used by the public workflow."""
-    return "metal"
 
+    return "metal"
 
 def detect_composition(*texts: str) -> str:
     joined = " ".join(str(text) for text in texts)
@@ -489,19 +401,17 @@ def detect_composition(*texts: str) -> str:
         "Could not detect composition. Pass --composition explicitly."
     )
 
-
 def detect_temperature_from_path(*texts: str, default: float = 380.0) -> float:
     joined = " ".join(str(text) for text in texts)
     candidates = [
         float(value)
         for value in re.findall(
-            r"(?<!\d)(2\d{2}|3\d{2}|4\d{2}|5\d{2})(?:metal)?(?!\d)",
+            r"(?<!\d)(2\d{2}|3\d{2}|4\d{2}|5\d{2})(?:K)?(?!\d)",
             joined,
         )
     ]
     plausible = sorted(set(x for x in candidates if 200 <= x <= 600))
     return plausible[0] if len(plausible) == 1 else float(default)
-
 
 def build_system_identity(
     topology: Path,
@@ -522,11 +432,6 @@ def build_system_identity(
         trajectory=str(trajectory.resolve()),
     )
 
-
-# =============================================================================
-# MDANALYSIS SETUP AND TOPOLOGY VALIDATION
-# =============================================================================
-
 def load_universe(topology: Path, trajectory: Path) -> mda.Universe:
     try:
         return mda.Universe(
@@ -543,7 +448,6 @@ def load_universe(topology: Path, trajectory: Path) -> mda.Universe:
             f"Original error: {exc}"
         ) from exc
 
-
 def select_atoms_by_type(
     universe: mda.Universe,
     atom_type: int,
@@ -555,7 +459,6 @@ def select_atoms_by_type(
             f"No {label} atoms found using selection 'type {atom_type}'."
         )
     return selection
-
 
 def require_topology_attributes(
     atom_group,
@@ -575,16 +478,10 @@ def require_topology_attributes(
             "The LAMMPS data file must preserve atom IDs and molecule/residue IDs."
         )
 
-
 def build_tfsi_reference_mapping(
     tfsi_reference_atoms,
     tfsi_oxygen_atoms,
 ) -> Tuple[Dict[int, int], Dict[int, int]]:
-    """
-    Return:
-      residue -> local reference-atom index
-      residue -> reference atom ID
-    """
 
     require_topology_attributes(
         tfsi_reference_atoms,
@@ -637,7 +534,6 @@ def build_tfsi_reference_mapping(
 
     return resid_to_local_index, resid_to_atom_id
 
-
 def summarize_topology(
     universe: mda.Universe,
     metal_atoms,
@@ -673,7 +569,6 @@ def summarize_topology(
         "tfsi_resid_max": int(np.max(unique_tfsi_resids)),
     }
 
-
 def validate_initial_box(universe: mda.Universe) -> Dict[str, Any]:
     universe.trajectory[0]
     dimensions = np.asarray(universe.trajectory.ts.dimensions, dtype=float)
@@ -695,11 +590,6 @@ def validate_initial_box(universe: mda.Universe) -> Dict[str, Any]:
         "box_volume_A3": float(universe.trajectory.ts.volume),
     }
 
-
-# =============================================================================
-# FRAME AND TIME HELPERS
-# =============================================================================
-
 def resolve_frame_selection(
     n_frames: int,
     start: int,
@@ -719,13 +609,10 @@ def resolve_frame_selection(
 
     return int(start), int(resolved_stop), int(stride), int(n_selected)
 
-
 def frame_time_ps(frame_index: int, frame_interval_ps: float) -> float:
     return float(frame_index) * float(frame_interval_ps)
 
-
 def get_trajectory_timestep(ts) -> Optional[int]:
-    """Extract the original LAMMPS timestep when available."""
 
     data = getattr(ts, "data", {})
     for key in ("step", "timestep", "time_step"):
@@ -735,7 +622,6 @@ def get_trajectory_timestep(ts) -> Optional[int]:
             except (TypeError, ValueError):
                 pass
     return None
-
 
 def format_eta(seconds: float) -> str:
     if not np.isfinite(seconds) or seconds < 0:
@@ -747,27 +633,12 @@ def format_eta(seconds: float) -> str:
         return f"{hours:d}h {minutes:02d}m {secs:02d}s"
     return f"{minutes:d}m {secs:02d}s"
 
-
-# =============================================================================
-# PAIR DETECTION
-# =============================================================================
-
 def detect_frame_pairs(
     metal_atoms,
     tfsi_oxygen_atoms,
     cutoff_A: float,
     box: np.ndarray,
 ) -> Tuple[List[Dict[str, Any]], int]:
-    """
-    Find all metal–oxygen contacts and reduce them to unique metal–TFSI pairs.
-
-    Returns
-    -------
-    pair_records
-        One dictionary per unique metal–TFSI pair.
-    n_contacts
-        Total metal–oxygen contacts inside the cutoff.
-    """
 
     metal_positions = np.asarray(metal_atoms.positions, dtype=np.float64)
     oxygen_positions = np.asarray(tfsi_oxygen_atoms.positions, dtype=np.float64)
@@ -836,11 +707,6 @@ def detect_frame_pairs(
 
     return pair_records, n_contacts
 
-
-# =============================================================================
-# TRAJECTORY PROCESSING
-# =============================================================================
-
 def process_trajectory(
     universe: mda.Universe,
     metal_atoms,
@@ -854,9 +720,6 @@ def process_trajectory(
     logger: logging.Logger,
     validation: ValidationReport,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """
-    Execute the full trajectory pass and stream the pair database to disk.
-    """
 
     start, stop, stride, n_selected = resolve_frame_selection(
         n_frames=len(universe.trajectory),
@@ -997,7 +860,8 @@ def process_trajectory(
                     "system": identity.system,
                     "metal_species": identity.metal_species,
                     "composition": identity.composition,
-                    "temperature_K": format_float(identity.temperature_K),                    "frame": frame,
+                    "temperature_K": format_float(identity.temperature_K),
+                    "frame": frame,
                     "trajectory_timestep": (
                         "" if trajectory_timestep is None else trajectory_timestep
                     ),
@@ -1133,8 +997,7 @@ def process_trajectory(
                 logger.info(
                     "Progress %6.2f%% | %d/%d frames | frame=%d | "
                     "pairs=%d | contacts=%d | elapsed=%s | ETA=%s",
-                    percent,
-                    selected_index,
+                    percent,                    selected_index,
                     n_selected,
                     frame,
                     n_pairs,
@@ -1253,11 +1116,6 @@ def process_trajectory(
 
     return frame_summaries, processing_summary
 
-
-# =============================================================================
-# COMMAND-LINE INTERFACE
-# =============================================================================
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -1287,9 +1145,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--metal",
-        choices=["metal", "metal"],
-        default=None,
-        help="Override automatic metal detection.",
+        default="metal",
+        help="Generic metal-ion label stored in output metadata.",
     )
     parser.add_argument(
         "--composition",
@@ -1298,10 +1155,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override automatic composition detection.",
     )
     parser.add_argument(
-        "--temperature-metal",
+        "--temperature-K",
         type=float,
         default=None,
-        help="Simulation temperature; otherwise detected or set to 380 metal.",
+        help="Simulation temperature in kelvin; otherwise detected or set to 380 K.",
     )
     parser.add_argument(
         "--frame-interval-ps",
@@ -1376,7 +1233,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     return parser
 
-
 def config_from_args(
     args: argparse.Namespace,
 ) -> Tuple[AnalysisConfig, SystemIdentity]:
@@ -1419,11 +1275,6 @@ def config_from_args(
     config.validate()
     return config, identity
 
-
-# =============================================================================
-# MAIN
-# =============================================================================
-
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -1442,7 +1293,7 @@ def main() -> None:
     logger.info("System             : %s", identity.system)
     logger.info("Metal species      : %s", identity.metal_species)
     logger.info("Composition        : %s", identity.composition)
-    logger.info("Temperature        : %.2f metal", identity.temperature_K)
+    logger.info("Temperature        : %.2f K", identity.temperature_K)
     logger.info("Topology           : %s", config.topology)
     logger.info("Trajectory         : %s", config.trajectory)
     logger.info("Output directory   : %s", outputs.root)
@@ -1655,7 +1506,6 @@ def main() -> None:
     logger.info(
         "Part 3 will add final cross-checks, event summaries, and figures."
     )
-
 
 if __name__ == "__main__":
     main()
