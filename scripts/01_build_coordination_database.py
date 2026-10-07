@@ -998,6 +998,7 @@ def analyze_system(system_name: str, config: dict):
                 "is_multi_metal_cluster":
                     int(n_metals_cluster >= 2),
             })
+
             for metal_local_index in metal_members:
 
                 metal_cluster_lookup[
